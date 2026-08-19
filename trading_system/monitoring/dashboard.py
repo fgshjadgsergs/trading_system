@@ -26,6 +26,9 @@ def validate_dashboard(dashboard: dict) -> list[str]:
         if field not in dashboard:
             problems.append(f"missing top-level field: {field}")
     panels = dashboard.get("panels", [])
+    if not isinstance(panels, list) or not all(isinstance(p, dict) for p in panels):
+        problems.append("panels must be a list of objects")
+        panels = []
     titles = {p.get("title") for p in panels}
     for required in REQUIRED_PANEL_TITLES:
         if required not in titles:
