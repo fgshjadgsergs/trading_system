@@ -1,0 +1,78 @@
+# Base configuration. All times UTC, timestamps in nanoseconds.
+project:
+  seed: 42
+  data_dir: data
+  reports_dir: reports
+
+exchanges:
+  binance_usdm:
+    ws_base: wss://fstream.binance.com
+    rest_base: https://fapi.binance.com
+    vision_base: https://data.binance.vision
+
+symbols: [BTCUSDT, SOLUSDT, DOGEUSDT]
+
+collect:
+  depth_interval: 100ms
+  open_interest_poll_s: 7
+  ratios_poll_s: 300
+  batch_max_rows: 50000
+  batch_max_age_s: 60
+  rotate: hourly            # parquet file rotation
+  partitions: [exchange, symbol, date]
+
+bars:
+  timeframes: [1m, 5m, 15m, 1h, 4h, 1d]
+  volume_bar_usd:
+    BTCUSDT: 5000000
+    SOLUSDT: 1000000
+    DOGEUSDT: 500000
+  impulse_k_sigma: 3.0      # bar volume > k * sigma of rolling window
+  zscore_window: 96
+
+liqmap:
+  bucket_atr_fraction: 0.1  # price bucket = fraction of ATR, not a fixed tick
+  atr_period: 14
+  leverage_grid: [3, 5, 10, 20, 25, 50, 75, 100, 125]
+  long_share_default: 0.5
+  decay_half_life_s: 86400
+  maint_margin_rate_flat: 0.005
+
+profile:
+  value_area_pct: 0.70
+  swing_fractal_n: 2
+  equal_extreme_eps_atr: 0.15
+  level_decay_half_life_s: 172800
+
+spoof:
+  large_level_atr_notional: 3.0   # "large" if size > k * median top-level size
+  flicker_k: 3
+  flicker_window_s: 60
+  iceberg_refill_ms: 300
+
+signals:
+  s1_magnet_max_dist_atr: 3.0
+  s2_sweep_return_bars: 3
+  s3_dense_zone_quantile: 0.9
+
+backtest:
+  latency_ms_min: 200
+  latency_ms_max: 500
+  taker_fee: 0.0005
+  maker_fee: 0.0002
+  half_spread_bps: 0.5
+
+risk:
+  target_daily_vol: 0.01
+  daily_stop_pct: 0.03
+  max_position_usd: 100000
+  kill_switch_errors: 5
+
+monitoring:
+  freshness_limits_s:
+    depth: 5
+    agg_trade: 10
+    force_order: 3600
+    mark_price: 5
+    open_interest: 30
+    kline_1m: 120
