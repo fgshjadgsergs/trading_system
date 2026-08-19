@@ -81,7 +81,9 @@ class FakeExchange:
 class Action:
     """One corrective step taken during reconciliation."""
 
-    kind: str  # cancel_unknown_order | mark_canceled | adopt_ack | adopt_fill | adopt_position
+    # cancel_unknown_order | mark_canceled | adopt_ack | adopt_fill
+    # | reissue_cancel | adopt_position
+    kind: str
     order_id: str | None
     detail: str
 
@@ -227,23 +229,47 @@ def reconcile_on_restart(
                     exchange=f"{eo.filled_qty:g}",
                 )
             )
+            # A fill on an order whose cancel is in flight is the legal
+            # PENDING_CANCEL self-loop, not PARTIALLY_FILLED.
+            fill_target = (
+                OrderState.PENDING_CANCEL
+                if lo.state is OrderState.PENDING_CANCEL
+                else OrderState.PARTIALLY_FILLED
+            )
             _journal_transition(
                 journal,
                 lo,
-                OrderState.PARTIALLY_FILLED,
+                fill_target,
                 ts,
                 "reconcile: adopt exchange fills",
                 fill_qty=delta,
                 fill_price=eo.price,
             )
             lo.filled_qty = eo.filled_qty
-            lo.state = OrderState.PARTIALLY_FILLED
+            lo.state = fill_target
             lo.last_ts = ts
             report.actions.append(
                 Action(kind="adopt_fill", order_id=oid, detail=f"adopted fill delta {delta:g}")
             )
-        elif lo.state is OrderState.PARTIALLY_FILLED and target_state is OrderState.PARTIALLY_FILLED:
-            pass  # already consistent
+        if lo.state is OrderState.PENDING_CANCEL:
+            # A cancel was in flight when we died and the exchange still shows
+            # the order open: the cancel never landed — re-issue it.
+            report.mismatches.append(
+                Mismatch(kind="state", order_id=oid, local=str(lo.state), exchange=eo.status)
+            )
+            client.cancel_order(symbol, oid)
+            _journal_transition(
+                journal, lo, OrderState.CANCELED, ts, "reconcile: re-issue in-flight cancel"
+            )
+            lo.state = OrderState.CANCELED
+            lo.last_ts = ts
+            report.actions.append(
+                Action(
+                    kind="reissue_cancel",
+                    order_id=oid,
+                    detail=f"cancel in flight at crash, exchange still {eo.status}; re-canceled",
+                )
+            )
 
     # 4) Position: exchange is the truth.
     pos = client.get_position(symbol)

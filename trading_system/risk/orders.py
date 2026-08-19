@@ -76,6 +76,13 @@ OPEN_STATES = frozenset(
 )
 
 
+# States whose transitions may carry fill quantity. The PENDING_CANCEL
+# self-loop is a fill arriving while a cancel is in flight.
+_FILL_STATES = frozenset(
+    {OrderState.PARTIALLY_FILLED, OrderState.FILLED, OrderState.PENDING_CANCEL}
+)
+
+
 class InvalidTransition(Exception):
     """Raised on a transition not present in ALLOWED_TRANSITIONS."""
 
@@ -222,7 +229,7 @@ class OrderStateMachine:
     def _apply_fill(self, to: OrderState, fill_qty: float, fill_price: float | None) -> None:
         if to is OrderState.FILLED and fill_qty <= 0:
             fill_qty = max(0.0, self.meta["qty"] - self.filled_qty)  # fill the remainder
-        if fill_qty > 0 and to in (OrderState.PARTIALLY_FILLED, OrderState.FILLED):
+        if fill_qty > 0 and to in _FILL_STATES:
             prev = self.filled_qty
             self.filled_qty = prev + fill_qty
             if fill_price is not None:
@@ -247,7 +254,7 @@ def _apply_entry(orders: dict[str, ReplayedOrder], entry: dict) -> None:
     fill_price = entry.get("fill_price")
     if to is OrderState.FILLED and fill_qty <= 0:
         fill_qty = max(0.0, float(o.meta.get("qty", 0.0)) - o.filled_qty)
-    if fill_qty > 0 and to in (OrderState.PARTIALLY_FILLED, OrderState.FILLED):
+    if fill_qty > 0 and to in _FILL_STATES:
         prev = o.filled_qty
         o.filled_qty = prev + fill_qty
         if fill_price is not None:
