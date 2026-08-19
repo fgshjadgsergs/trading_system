@@ -25,6 +25,30 @@ class HeatHistory:
         self.ts.append(ts)
         self._frames.append(combined)
 
+    def __len__(self) -> int:
+        return len(self._frames)
+
+    def total_at(self, i: int) -> float:
+        """Total heat (USD) in the snapshot recorded at index i."""
+        return sum(self._frames[i].values())
+
+    def pools_at(self, i: int, k: int = 8) -> list[tuple[float, float]]:
+        """Top-k pools of snapshot i as (bucket center price, heat), descending.
+
+        Snapshot i is the map state at the close of bar i — the causal view a
+        signal firing at that close is allowed to see.
+        """
+        frame = self._frames[i]
+        top = sorted(frame.items(), key=lambda kv: -kv[1])[:k]
+        return [((idx + 0.5) * self._bucket_size, heat) for idx, heat in top]
+
+    def zones_at(self, i: int) -> tuple[list[float], list[float], list[float]]:
+        """Snapshot i as parallel (lo, hi, heat) lists for zone filters."""
+        frame = self._frames[i]
+        lo = [idx * self._bucket_size for idx in frame]
+        hi = [(idx + 1) * self._bucket_size for idx in frame]
+        return lo, hi, list(frame.values())
+
     def matrix(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Returns (ts[n], bucket_center_prices[m], H[m, n]) for imshow overlays."""
         if not self._frames:

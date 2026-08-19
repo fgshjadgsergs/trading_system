@@ -71,6 +71,26 @@ def test_liq_price_with_bracket_cum():
     assert short > 50_000.0 > got
 
 
+def test_liq_price_bracket_tier_self_consistent():
+    """The applied tier must contain the notional AT the liquidation price,
+    not at entry (Binance computes maintenance from mark-price notional)."""
+    f = BinanceUsdmLiquidation(brackets={"BTCUSDT": DEFAULT_BRACKETS})
+    # 6 BTC long @50k 2x: entry notional 300k (tier 3), but at LP the notional
+    # is ~150k (tier 2) -> tier-2 solution is the self-consistent one
+    lp = f.liq_price(50_000.0, 2, Side.BUY, symbol="BTCUSDT", qty=6.0)
+    assert lp == pytest.approx((50_000.0 * 0.5 - 50.0 / 6.0) / (1 - 0.005), rel=1e-12)
+    assert 50_000 < lp * 6.0 <= 250_000  # lands in the tier that produced it
+    # entry-tier (wrong) answer would have been lower: heat placed too deep
+    wrong = (50_000.0 * 0.5 - 1_300.0 / 6.0) / (1 - 0.01)
+    assert lp > wrong
+    # short crossing UP a tier: 6 @40k 2x, entry 240k (tier 2) -> LP in tier 3
+    lps = f.liq_price(40_000.0, 2, Side.SELL, symbol="BTCUSDT", qty=6.0)
+    assert lps == pytest.approx((40_000.0 * 1.5 + 1_300.0 / 6.0) / (1 + 0.01), rel=1e-12)
+    assert 250_000 < lps * 6.0 <= 1_000_000
+    # 1x long still clamps to 0 (never liquidates above zero)
+    assert f.liq_price(100.0, 1, Side.BUY, symbol="BTCUSDT", qty=1.0) == 0.0
+
+
 def test_bracket_lookup_monotonic():
     mmrs = [bracket_for(n, DEFAULT_BRACKETS).mmr for n in (1e4, 1e5, 5e5, 5e6, 1.5e7, 3e7, 7e7, 1.5e8, 5e8)]
     assert mmrs == sorted(mmrs)
@@ -123,6 +143,18 @@ def test_consume_zeroes_traversed_zones_only():
             assert hi < 49_000.0 or lo > 50_500.0  # nothing left inside the path
             assert h == before[side][idx]  # untouched pools unchanged
     assert lm.mass_balance_error() < 1e-6
+
+
+def test_consume_respects_half_open_bucket_boundary():
+    """A pool in [49990, 50000) survives a path that starts exactly at 50000."""
+    lm = LiqMap([10], PriceBuckets(10.0), StaticWeights(np.array([1.0])))
+    lm.heat[Side.BUY][lm.buckets.index(49_995.0)] = 100.0
+    lm.contributed = 100.0
+    taken = lm.consume(50_000.0, 50_050.0)
+    assert taken == 0.0
+    assert lm.total_heat() == pytest.approx(100.0)
+    # but a path that actually enters the bucket takes it
+    assert lm.consume(49_999.9, 50_050.0) == pytest.approx(100.0)
 
 
 def test_consume_returns_all_heat_on_full_sweep():

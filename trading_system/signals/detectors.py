@@ -87,16 +87,26 @@ def s2_sweep_reversal(
     bar high <= L); the signal fires at the first bar j in (i, i+return_bars]
     that closes back below L AND below the sweep bar's low (structure shift).
     One event per pierce episode; mirrored for equal-lows.
+
+    Causality: if `levels` carries a `ts_formed` column (e.g. equal_extremes'
+    ts_last — when the cluster's last member was confirmed), only bars opening
+    at/after formation can pierce; the level does not exist before that.
     """
     highs = bars["high"].to_list()
     lows = bars["low"].to_list()
     closes = bars["close"].to_list()
+    ts_open = bars["ts_open"].to_list()
     ts_close = bars["ts_close"].to_list()
+    has_formed = "ts_formed" in levels.columns
     rows: list[dict] = []
     for lvl in levels.iter_rows(named=True):
         price, kind = lvl["price"], lvl["kind"]
+        formed = lvl["ts_formed"] if has_formed else None
         i = 1
         while i < len(highs):
+            if formed is not None and ts_open[i] < formed:
+                i += 1
+                continue
             if kind == "high":
                 pierced = highs[i] > price and highs[i - 1] <= price
             else:

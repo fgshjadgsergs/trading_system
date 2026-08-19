@@ -37,12 +37,14 @@ def build_demo_map(seed: int = 42) -> tuple[pl.DataFrame, LiqMap, HeatHistory]:
     )
     hist = HeatHistory(lm)
     for row in bars.iter_rows(named=True):
-        d_oi = row["d_oi_usd"] or 0.0
+        d_oi = row["d_oi_usd"]
+        if d_oi is None:  # warm-up bars before the first OI point
+            d_oi = row["quote_volume"] * 0.05
         lm.step(
             bar_low=row["low"],
             bar_high=row["high"],
             bar_close=row["close"],
-            d_oi_usd=abs(d_oi) if d_oi else row["quote_volume"] * 0.05,
+            d_oi_usd=d_oi,  # signed: negative ΔOI removes heat proportionally
             dt_s=(row["ts_close"] - row["ts_open"]) / 1e9,
         )
         hist.record(row["ts_close"])

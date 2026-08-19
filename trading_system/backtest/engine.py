@@ -212,7 +212,10 @@ def funding_events(mark_prices: pl.DataFrame, ts_lo: int, ts_hi: int) -> list[tu
     for f_ts in times:
         if not ts_lo <= f_ts <= ts_hi:
             continue
-        j = int(np.searchsorted(ts, f_ts, side="right")) - 1
+        # last row STRICTLY before the funding time: a row stamped exactly at
+        # f_ts already belongs to the next period (its next_funding_ts > f_ts)
+        # and carries the new period's estimate, not the settled rate
+        j = int(np.searchsorted(ts, f_ts, side="left")) - 1
         if j < 0:
             continue
         out.append((int(f_ts), float(rate[j]), float(px[j])))
@@ -384,12 +387,20 @@ class _Engine:
         if self.cur_bar is not None and t - t % self.cfg.bar_ns > self.cur_bar.ts_open:
             self._close_bar(t, i)
 
+    def _recent_volume(self, t: int) -> float:
+        """USD volume in the window ending at t — evicted at query time, so a
+        fill after a quiet gap sees the (near-empty) window it deserves."""
+        cutoff = t - self.window_ns
+        while self.vol_window and self.vol_window[0][0] < cutoff:
+            self.vol_sum -= self.vol_window.popleft()[1]
+        return self.vol_sum
+
     def _market_price(self, o: Order, qty: float, t: int, mid: float, hs_bps: float) -> float:
         if self.book_provider is not None:
             levels = self.book_provider(t, o.side)
             return walk_book(levels, qty)
         imp = impact_bps(
-            qty * mid, self.vol_sum, self.cfg.impact_coef_bps, self.cfg.impact_cap_bps
+            qty * mid, self._recent_volume(t), self.cfg.impact_coef_bps, self.cfg.impact_cap_bps
         )
         return market_fill_price(o.side, mid, hs_bps, imp)
 
@@ -405,18 +416,24 @@ class _Engine:
 
     def _match_limits(self, i: int, t: int, print_price: float, print_qty: float) -> None:
         filled_any = False
+        # one print provides at most its own participation-capped quantity,
+        # shared across ALL resting orders it crosses (no manufactured makers)
+        capacity = print_qty * self.cfg.limit_participation
         for p in self.pending:
+            if capacity <= 1e-12:
+                break
             o = p.order
             if o.order_type is not OrderType.LIMIT or o.ts_active > t or p.min_print_i > i:
                 continue
             assert o.limit_price is not None
             if not limit_crossed(o.side, o.limit_price, print_price):
                 continue
-            qty = min(p.remaining, print_qty * self.cfg.limit_participation)
+            qty = min(p.remaining, capacity)
             if qty <= 0.0:
                 continue
             ref = self.last_price if not math.isnan(self.last_price) else o.limit_price
             self._fill(p, t, o.limit_price, qty, ref, maker=True)
+            capacity -= qty
             filled_any = True
         if filled_any:
             self.pending = [p for p in self.pending if p.remaining > 1e-12]
@@ -489,12 +506,16 @@ class _Engine:
         if self.cur_bar is not None:
             end_ts = max(end_ts, self.cur_bar.ts_close)
             self._close_bar(last_t, self.n)
-        # Market orders still pending at end of data execute at the final mid
-        # (spread and impact applied); resting limit orders expire unfilled.
+        # Market orders that became eligible during the data (latency elapsed,
+        # a later print existed) execute at the final mid; everything else —
+        # including orders placed on the very last print — expires unfilled,
+        # so the latency invariant holds even at the boundary.
         mid, hs_bps = self.last_price, self.cfg.half_spread_bps
         if self.bbo_ts is not None and self.bbo_i >= 0:
             mid, hs_bps = self._mid_spread()
         for p in [q for q in self.pending if q.order.order_type is OrderType.MARKET]:
+            if p.order.ts_active > last_t or p.min_print_i >= self.n:
+                continue
             price = self._market_price(p.order, p.remaining, last_t, mid, hs_bps)
             self._fill(p, last_t, price, p.remaining, mid, maker=False)
         self.pending = [p for p in self.pending if p.remaining > 1e-12]

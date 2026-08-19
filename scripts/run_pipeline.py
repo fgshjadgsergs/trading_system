@@ -50,7 +50,8 @@ from trading_system.features import (
 )
 from trading_system.liqmap import HeatHistory, LiqMap, PriceBuckets, StaticWeights
 from trading_system.profile import equal_extremes, fractal_swings, profile
-from trading_system.signals import s1_magnet, s2_sweep_reversal, s3_filter
+from trading_system.signals import s2_sweep_reversal, s3_filter
+from trading_system.signals.detectors import EVENT_SCHEMA
 from trading_system.viz import build_report, dist_plot, overlay_chart
 from trading_system.viz.style import PALETTE, apply_style, save_fig
 
@@ -106,7 +107,7 @@ def stage_features(lake: Path, symbol: str, timeframe: str) -> tuple[pl.DataFram
     return trades, bars
 
 
-def stage_map(bars: pl.DataFrame, cfg: dict) -> tuple[LiqMap, HeatHistory, pl.DataFrame]:
+def stage_map(bars: pl.DataFrame, cfg: dict) -> tuple[LiqMap, HeatHistory]:
     lm_cfg = cfg["liqmap"]
     atr = float(bars["atr"].drop_nulls().median())
     grid = [float(x) for x in lm_cfg["leverage_grid"]]
@@ -131,44 +132,92 @@ def stage_map(bars: pl.DataFrame, cfg: dict) -> tuple[LiqMap, HeatHistory, pl.Da
             dt_s=(row["ts_close"] - row["ts_open"]) / 1e9,
         )
         hist.record(row["ts_close"])
-    pools = pl.DataFrame(
-        {
-            "price": [p for p, _, _ in lm.top_pools(8)],
-            "heat_usd": [h for _, h, _ in lm.top_pools(8)],
-            "touched_ts": pl.Series([None] * len(lm.top_pools(8)), dtype=pl.Int64),
-        }
-    )
-    log.info("map.done", total_heat=round(lm.total_heat()), pools=pools.height)
-    return lm, hist, pools
+    log.info("map.done", total_heat=round(lm.total_heat()), snapshots=len(hist))
+    return lm, hist
 
 
-def heat_zones(lm: LiqMap) -> pl.DataFrame:
-    snap = lm.snapshot()
-    heat = snap["long"] + snap["short"]
-    if heat.size == 0:
-        return pl.DataFrame({"lo": [], "hi": [], "heat_usd": []})
-    half = lm.buckets.bucket_size / 2
-    return pl.DataFrame(
-        {
-            "lo": (snap["prices"] - half).tolist(),
-            "hi": (snap["prices"] + half).tolist(),
-            "heat_usd": heat.tolist(),
-        }
-    ).filter(pl.col("heat_usd") > 0)
-
-
-def stage_signals(
-    bars: pl.DataFrame, pools: pl.DataFrame, lm: LiqMap, trades: pl.DataFrame, cfg: dict
+def causal_s1_events(
+    bars: pl.DataFrame, hist: HeatHistory, k_atr: float, min_heat_share: float
 ) -> pl.DataFrame:
+    """S1 over the CONCURRENT map snapshot of each bar (никакого будущего тепла).
+
+    Snapshot i is the map state at bar i's close; the fire-once rule matches
+    s1_magnet's edge trigger. A consumed pool disappears from later snapshots,
+    which is exactly the "нетронутый пул" condition.
+    """
+    rows: list[dict] = []
+    fired: set[float] = set()
+    for i, bar in enumerate(bars.iter_rows(named=True)):
+        atr = bar["atr"]
+        if atr is None or i >= len(hist):
+            continue
+        total = hist.total_at(i)
+        if total <= 0:
+            continue
+        close, ts = bar["close"], bar["ts_close"]
+        in_range = [(p, h) for p, h in hist.pools_at(i, k=8) if abs(p - close) <= k_atr * atr]
+        if not in_range:
+            continue
+        price, heat = max(in_range, key=lambda ph: ph[1])
+        if heat < min_heat_share * total or price in fired:
+            continue
+        fired.add(price)
+        rows.append(
+            {
+                "ts": ts,
+                "signal": "s1",
+                "side": 1 if price > close else -1,
+                "price": close,
+                "target": price,
+                "meta": heat,
+            }
+        )
+    return pl.DataFrame(rows, schema=EVENT_SCHEMA).sort("ts")
+
+
+def causal_s3_filter(
+    events: pl.DataFrame, bars: pl.DataFrame, hist: HeatHistory, dense_quantile: float
+) -> pl.DataFrame:
+    """S3 veto per event against the map snapshot CONCURRENT with that event."""
+    if events.is_empty():
+        return s3_filter(events, pl.DataFrame({"lo": [], "hi": [], "heat_usd": []}))
+    index_of_ts = {int(t): i for i, t in enumerate(bars["ts_close"].to_list())}
+    parts: list[pl.DataFrame] = []
+    for ev in events.iter_rows(named=True):
+        i = index_of_ts.get(ev["ts"])
+        one = pl.DataFrame([ev], schema_overrides=EVENT_SCHEMA)
+        if i is None or i >= len(hist):
+            zones = pl.DataFrame({"lo": [], "hi": [], "heat_usd": []})
+        else:
+            lo, hi, heat = hist.zones_at(i)
+            zones = pl.DataFrame({"lo": lo, "hi": hi, "heat_usd": heat})
+        parts.append(s3_filter(one, zones, dense_quantile=dense_quantile))
+    return pl.concat(parts).sort("ts")
+
+
+def stage_signals(bars: pl.DataFrame, hist: HeatHistory, cfg: dict) -> pl.DataFrame:
     s_cfg = cfg["signals"]
-    span = float(bars["high"].max() - bars["low"].min())
+    # eps scale from the EARLY window's ATR — no full-sample statistics
+    warmup_atr = float(bars["atr"].drop_nulls().head(50).median())
+    eps = float(cfg["profile"]["equal_extreme_eps_atr"]) * warmup_atr
     swings = fractal_swings(bars, n=2)
-    clusters = equal_extremes(swings, eps=span / 100)
-    ev1 = s1_magnet(bars, pools, k_atr=float(s_cfg["s1_magnet_max_dist_atr"]), min_heat_share=0.2)
+    clusters = equal_extremes(swings, eps=eps).with_columns(
+        pl.col("ts_last").alias("ts_formed")  # level exists only once fully formed
+    )
+    ev1 = causal_s1_events(
+        bars, hist, k_atr=float(s_cfg["s1_magnet_max_dist_atr"]), min_heat_share=0.1
+    )
     ev2 = s2_sweep_reversal(bars, clusters, return_bars=int(s_cfg["s2_sweep_return_bars"]))
     events = pl.concat([e for e in (ev1, ev2) if e.height]) if (ev1.height or ev2.height) else ev1
-    events = s3_filter(events, heat_zones(lm), dense_quantile=float(s_cfg["s3_dense_zone_quantile"]))
-    log.info("signals.done", s1=ev1.height, s2=ev2.height, blocked=int(events["blocked"].sum()) if events.height else 0)
+    events = causal_s3_filter(
+        events, bars, hist, dense_quantile=float(s_cfg["s3_dense_zone_quantile"])
+    )
+    log.info(
+        "signals.done",
+        s1=ev1.height,
+        s2=ev2.height,
+        blocked=int(events["blocked"].sum()) if events.height else 0,
+    )
     return events
 
 
@@ -269,16 +318,17 @@ def main() -> None:
     figures: list[tuple[Path, str]] = []
     figures += stage_book(lake, args.symbol, out)
     trades, bars = stage_features(lake, args.symbol, args.timeframe)
-    lm, hist, pools = stage_map(bars, cfg)
-    events = stage_signals(bars, pools, lm, trades, cfg)
+    lm, hist = stage_map(bars, cfg)
+    events = stage_signals(bars, hist, cfg)
     span = float(bars["high"].max() - bars["low"].min())
     prof = profile(trades, bin_size=span / 60)
+    final_pools = pl.DataFrame({"price": [p for p, _ in hist.pools_at(len(hist) - 1, k=8)]})
     p_overlay = overlay_chart(
         bars,
         heat=hist.matrix(),
         events=events,
         profile=prof,
-        levels=pools.select("price"),
+        levels=final_pools,  # reporting only: final-state pool lines for context
         name="pipeline_overlay",
         out_dir=out,
         title=f"{args.symbol}: свечи + карта ликвидаций + сигналы",

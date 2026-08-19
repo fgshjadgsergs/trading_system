@@ -173,6 +173,26 @@ def test_s2_prefix_consistency():
         assert pref.equals(expected), f"prefix {cut} diverges"
 
 
+def test_s2_level_formation_gating():
+    """A pierce before the cluster is formed (ts_formed) must not fire."""
+    ohlc = [
+        (100.0, 105.0, 98.0, 104.0),
+        (104.0, 112.0, 103.0, 108.0),  # pierce at bar 1
+        (108.0, 109.0, 98.5, 99.0),  # would-be reversal at bar 2
+        (99.0, 101.0, 97.0, 100.0),
+        (100.0, 112.5, 99.0, 108.0),  # pierce again at bar 4 (post-formation)
+        (108.0, 109.0, 95.0, 96.0),  # reversal at bar 5: close < 110 and < low[4]=99
+    ]
+    bars = make_bars(ohlc)
+    level = LEVEL.with_columns(pl.lit(T0 + 4 * NS_PER_MIN).cast(pl.Int64).alias("ts_formed"))
+    ev = s2_sweep_reversal(bars, level, return_bars=3)
+    assert ev.height == 1
+    assert ev["ts"][0] == T0 + 6 * NS_PER_MIN  # only the post-formation episode
+    # without the column the early episode fires (backward compatible)
+    ev_all = s2_sweep_reversal(bars, LEVEL, return_bars=3)
+    assert ev_all["ts"][0] == T0 + 3 * NS_PER_MIN
+
+
 # -- S3 filter ----------------------------------------------------------------
 
 

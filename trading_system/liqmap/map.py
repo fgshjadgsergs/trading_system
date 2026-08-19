@@ -150,7 +150,9 @@ class LiqMap:
         taken = 0.0
         for side_heat in self.heat.values():
             for idx in list(side_heat):
-                if self.buckets.hi(idx) >= path_lo and self.buckets.lo(idx) <= path_hi:
+                # buckets are half-open [lo, hi): a bucket ending exactly at
+                # path_lo was never traversed, so the overlap test is strict
+                if self.buckets.hi(idx) > path_lo and self.buckets.lo(idx) <= path_hi:
                     taken += side_heat.pop(idx)
         self.consumed += taken
         return taken

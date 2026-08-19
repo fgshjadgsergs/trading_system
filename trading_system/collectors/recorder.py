@@ -101,8 +101,9 @@ class RestPoller:
     """Generic fixed-interval async poller: fetch -> normalize -> sink.
 
     normalizer(payload, ts_recv) returns unified records; sink receives each
-    record (typically BatchWriter.add). Fetch errors are logged and skipped —
-    polling never dies on a single bad response.
+    record (typically BatchWriter.add). Fetch, normalize and sink errors are
+    all logged and skipped — polling never dies on a single bad response
+    (Binance /futures/data endpoints can return error objects with HTTP 200).
     """
 
     def __init__(
@@ -137,15 +138,14 @@ class RestPoller:
         while not self._stopped and (n_polls is None or polls < n_polls):
             try:
                 payload = await self._fetch()
-            except Exception as exc:  # noqa: BLE001 - poller must survive fetch errors
-                log.warning("poll_fetch_error", error=str(exc))
-                if self._on_error is not None:
-                    self._on_error(exc)
-            else:
                 ts_recv = self._clock()
                 for rec in self._normalizer(payload, ts_recv):
                     self._sink(rec)
                     emitted += 1
+            except Exception as exc:  # noqa: BLE001 - poller must survive bad responses
+                log.warning("poll_error", error=str(exc))
+                if self._on_error is not None:
+                    self._on_error(exc)
             polls += 1
             if self._stopped or (n_polls is not None and polls >= n_polls):
                 break

@@ -93,5 +93,19 @@ class BinanceUsdmLiquidation(LiquidationFormula):
         table = self._brackets.get(symbol) if symbol else None
         if table is None or qty is None:
             return liq_price(entry, leverage, side, self._flat_mmr)
+        # The exchange applies the tier containing the notional AT the mark
+        # price, so the liquidation price must be tier-self-consistent: solve
+        # per tier and accept the tier whose notional range contains qty * LP.
+        # Bracket tables are continuous in notional, so exactly one tier fits
+        # (up to a boundary); fall back to the entry-notional tier otherwise.
+        prev_max = 0.0
+        for b in table:
+            lp = liq_price(entry, leverage, side, b.mmr, cum=b.cum, qty=qty)
+            notional = lp * qty
+            if prev_max < notional <= b.max_notional_usd or (
+                notional <= b.max_notional_usd and prev_max == 0.0
+            ):
+                return lp
+            prev_max = b.max_notional_usd
         b = bracket_for(entry * qty, table)
         return liq_price(entry, leverage, side, b.mmr, cum=b.cum, qty=qty)

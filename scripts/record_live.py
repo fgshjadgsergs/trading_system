@@ -79,7 +79,12 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
         log.warning("depth_gap", symbol=gap.symbol, expected=gap.expected, got=gap.got)
 
     async def resync(symbol: str) -> None:
-        snap = await adapter.snapshot(symbol)
+        try:
+            snap = await adapter.snapshot(symbol)
+        except Exception as exc:  # noqa: BLE001 - transient REST failures must not kill the recorder
+            resync_pending.add(symbol)  # retry on the next depth diff
+            log.warning("book_resync_failed", symbol=symbol, error=str(exc))
+            return
         for ready in sequencers[symbol].set_snapshot(snap):
             writer.add(ready)
         writer.add(snap)
@@ -98,7 +103,8 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
             RestPoller(
                 float(col_cfg["open_interest_poll_s"]),
                 partial(http_get_json, f"{rest_base}/fapi/v1/openInterest", {"symbol": sym}),
-                parse_open_interest,
+                # parse_open_interest returns ONE record; RestPoller iterates
+                lambda payload, ts_recv: [parse_open_interest(payload, ts_recv)],
                 writer.add,
             )
         )
@@ -111,7 +117,8 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
                 RestPoller(
                     float(col_cfg["ratios_poll_s"]),
                     partial(http_get_json, f"{rest_base}{path}", {"symbol": sym, "period": "5m", "limit": 1}),
-                    parser,
+                    # takerlongshortRatio payloads carry no symbol field
+                    partial(parser, symbol=sym),
                     writer.add,
                 )
             )

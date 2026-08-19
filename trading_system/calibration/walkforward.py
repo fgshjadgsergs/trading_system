@@ -123,13 +123,25 @@ def _rolling_sum(x: np.ndarray, window: int) -> np.ndarray:
     return c[1:] - c[lo]
 
 
-def tag_regimes(prices: np.ndarray, window: int = 50) -> RegimeTags:
-    """Trend/chop by rolling directional ratio, high/low vol by median split.
+def _expanding_median(x: np.ndarray) -> np.ndarray:
+    """median(x[: t + 1]) for every t — the causal split threshold."""
+    out = np.empty_like(x)
+    for t in range(len(x)):
+        out[t] = np.median(x[: t + 1])
+    return out
+
+
+def tag_regimes(
+    prices: np.ndarray, window: int = 50, trend_threshold: float = 0.3
+) -> RegimeTags:
+    """Trend/chop by rolling directional ratio, high/low vol by expanding median.
 
     Directional ratio = |sum of log returns| / sum |log returns| over the
-    trailing window (1 = straight line, ~0 = pure chop). Both classifiers use
-    a median split over the full series so the two classes stay balanced.
-    All rolling windows are trailing: tags at t use prices[: t + 1] only.
+    trailing window; it has an absolute scale (1 = straight line, ~1/sqrt(window)
+    = pure chop), so trend uses a fixed threshold. Volatility has no absolute
+    scale, so its split is the EXPANDING median (median of rv[: t + 1]). Both
+    classifiers are causal: tags at t use prices[: t + 1] only — an early
+    fold's label cannot depend on later data.
     """
     prices = np.asarray(prices, dtype=float)
     if len(prices) < 3:
@@ -141,8 +153,8 @@ def tag_regimes(prices: np.ndarray, window: int = 50) -> RegimeTags:
     sq = _rolling_sum(r**2, window)
     cnt = np.minimum(np.arange(1, len(r) + 1), window)
     rv = np.sqrt(sq / np.maximum(cnt, 1))
-    trend = dir_ratio > np.median(dir_ratio)
-    high_vol = rv > np.median(rv)
+    trend = dir_ratio > trend_threshold
+    high_vol = rv > _expanding_median(rv)
     label = np.array(
         [
             f"{'trend' if t else 'chop'}/{'high_vol' if v else 'low_vol'}"
