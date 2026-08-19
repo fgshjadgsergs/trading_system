@@ -27,17 +27,26 @@ trading_system/
   monitoring/  — M11: свежесть потоков, алерты, live-PnL против бэктеста
   calibration/ — этап 3: event studies, калибровка весов плеч, walk-forward
 configs/       — yaml-конфиги
-scripts/       — run_pipeline.py (сквозной прогон), загрузка Vision, отчёт качества
+scripts/       — см. ниже
 tests/         — pytest + hypothesis
 reports/       — png-отчёты каждого модуля
 ```
+
+## Скрипты
+
+| Скрипт | Что делает |
+|---|---|
+| `scripts/run_pipeline.py` | Gate 2: сквозной прогон «запись → стакан → фичи → карта → сигналы → бэктест» одним скриптом; отчёт в `reports/pipeline/` |
+| `scripts/record_live.py` | Live-сбор (этап 1.1): WS depth/aggTrade/forceOrder/markPrice/kline + REST OI/ратио → parquet-лейк, ресинк книги по U/u/pu |
+| `scripts/download_vision.py` | Массовая загрузка data.binance.vision с проверкой чексумм, нормализация в единую схему, каталог датасетов |
+| `scripts/quality_report.py` | Ежедневный отчёт качества: аптайм, гэпы, гистограммы задержек |
 
 ## Запуск
 
 ```bash
 pip install -e ".[dev]"
-pytest                          # все тесты
-python scripts/run_pipeline.py  # сквозной прогон на синтетике/записях
+pytest                                    # все тесты
+PYTHONPATH=. python3 scripts/run_pipeline.py  # сквозной прогон на синтетике/записях
 ```
 
 Все случайности сидированы (`configs/base.yaml: project.seed`). CI — GitHub Actions

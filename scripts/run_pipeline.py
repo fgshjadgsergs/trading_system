@@ -142,7 +142,7 @@ def stage_map(bars: pl.DataFrame, cfg: dict) -> tuple[LiqMap, HeatHistory, pl.Da
     return lm, hist, pools
 
 
-def heat_zones(lm: LiqMap, quantile: float) -> pl.DataFrame:
+def heat_zones(lm: LiqMap) -> pl.DataFrame:
     snap = lm.snapshot()
     heat = snap["long"] + snap["short"]
     if heat.size == 0:
@@ -167,7 +167,7 @@ def stage_signals(
     ev1 = s1_magnet(bars, pools, k_atr=float(s_cfg["s1_magnet_max_dist_atr"]), min_heat_share=0.2)
     ev2 = s2_sweep_reversal(bars, clusters, return_bars=int(s_cfg["s2_sweep_return_bars"]))
     events = pl.concat([e for e in (ev1, ev2) if e.height]) if (ev1.height or ev2.height) else ev1
-    events = s3_filter(events, heat_zones(lm, 0.9), dense_quantile=float(s_cfg["s3_dense_zone_quantile"]))
+    events = s3_filter(events, heat_zones(lm), dense_quantile=float(s_cfg["s3_dense_zone_quantile"]))
     log.info("signals.done", s1=ev1.height, s2=ev2.height, blocked=int(events["blocked"].sum()) if events.height else 0)
     return events
 
