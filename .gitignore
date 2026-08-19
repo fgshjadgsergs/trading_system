@@ -9,3 +9,4 @@ dist/
 data/
 .venv/
 .DS_Store
+.claude/
