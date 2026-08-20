@@ -81,6 +81,9 @@ def _report(counts: Counter, samples: dict[str, str]) -> None:
     print("\nпервые сообщения:")
     for kind, s in samples.items():
         print(f"  [{kind}] {s}")
+    # одна компактная строка — переживает потерю строк при копировании из консоли
+    summary = " ".join(f"{k}={n}" for k, n in sorted(counts.items())) or "пусто"
+    print(f"\nИТОГ: {summary}")
 
 
 def _stream_params(symbols: list[str], kinds: list[str], streams: list[str] | None) -> list[str]:

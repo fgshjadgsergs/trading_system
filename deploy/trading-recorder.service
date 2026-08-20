@@ -1,0 +1,20 @@
+# systemd-юнит live-рекордера. Пути рассчитаны на установку в /home/ubuntu —
+# при другом пользователе/пути поправьте User, WorkingDirectory и ExecStart.
+[Unit]
+Description=Binance USDT-M liquidation-map live recorder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trading_system
+ExecStart=/home/ubuntu/trading_system/.venv/bin/python scripts/record_live.py --lake data/live_lake
+Restart=always
+RestartSec=5
+# flush буферов на диске при остановке сервиса
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
