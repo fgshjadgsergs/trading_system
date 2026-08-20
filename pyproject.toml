@@ -39,6 +39,9 @@ include = ["trading_system*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "stress: нагрузочные/адверсариальные тесты (tests/stress/); масштаб — env STRESS_SCALE",
+]
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::FutureWarning",
