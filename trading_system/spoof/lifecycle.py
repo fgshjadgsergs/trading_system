@@ -216,7 +216,19 @@ class LevelJournal:
     # -- public API ---------------------------------------------------------
 
     def run(self, states: Sequence[BookState], trades: Sequence[Trade]) -> LevelJournal:
-        """Process a full session of book states against the trade tape."""
+        """Process a full session of book states against the trade tape.
+
+        ``states`` must be ordered by non-decreasing ``ts`` (equal timestamps
+        are allowed); out-of-order states would silently corrupt episode
+        lifetimes and tape matching, so they raise ``ValueError`` instead.
+        ``trades`` may arrive in any order (the matcher sorts them).
+        """
+        for prev_st, st in zip(states, states[1:], strict=False):
+            if st.ts < prev_st.ts:
+                raise ValueError(
+                    f"book states must be ordered by non-decreasing ts: "
+                    f"{st.ts} follows {prev_st.ts}"
+                )
         self._matcher = _TapeMatcher(trades, match_taker_side=self.match_taker_side)
         for st in states:
             self._step(st)
