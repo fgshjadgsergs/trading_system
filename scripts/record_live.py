@@ -124,10 +124,14 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
             )
     poller_tasks = [asyncio.create_task(p.run()) for p in pollers]
 
+    rec_counts: dict[str, int] = {}
+
     async def flush_gaps_periodically() -> None:
         while True:
             await asyncio.sleep(60)
             writer.poll()
+            # heartbeat: what actually flows through normalize, by record type
+            log.info("stream_counts", **dict(sorted(rec_counts.items())))
             if gap_log:
                 write_gap_events(lake, list(gap_log), "binance_usdm", "depth")
                 gap_log.clear()
@@ -137,6 +141,8 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
     try:
         async for raw in adapter.subscribe(symbols, WS_STREAMS):
             for rec in adapter.normalize(raw):
+                name = type(rec).__name__
+                rec_counts[name] = rec_counts.get(name, 0) + 1
                 if isinstance(rec, DepthDiff):
                     seq = sequencers[rec.symbol]
                     for ready in seq.add_diff(rec):
