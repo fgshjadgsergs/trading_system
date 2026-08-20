@@ -43,6 +43,18 @@ log = structlog.get_logger()
 
 WS_STREAMS = ["depth", "agg_trade", "force_order", "mark_price", "kline_1m"]
 
+# Message-arrival heartbeat per stream kind. Dead links are caught by the
+# protocol-level ping/pong (15s/10s in websockets_transport_factory), so a long
+# heartbeat is safe; forceOrder is legitimately silent for hours and must NOT
+# be reconnect-churned — every reconnect is a blind window for liquidations.
+HEARTBEAT_S = {
+    "depth": 30.0,  # fixed cadence 10 msg/s per symbol — 30s of silence is real trouble
+    "agg_trade": 90.0,
+    "mark_price": 90.0,  # fixed cadence 1 msg/s per symbol
+    "kline_1m": 90.0,
+    "force_order": 21_600.0,
+}
+
 
 async def http_get_json(url: str, params: dict | None = None) -> dict:
     if params:
@@ -142,7 +154,8 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
         # One connection per stream kind: gateways have been observed to honor
         # only the first streams of a wide combined subscription (20.08.2026),
         # and per-kind sockets also isolate reconnects between streams.
-        async for raw in adapter.subscribe(symbols, [kind]):
+        kwargs = {"heartbeat_s": HEARTBEAT_S.get(kind, 90.0)}
+        async for raw in adapter.subscribe(symbols, [kind], ws_client_kwargs=kwargs):
             for rec in adapter.normalize(raw):
                 name = type(rec).__name__
                 rec_counts[name] = rec_counts.get(name, 0) + 1

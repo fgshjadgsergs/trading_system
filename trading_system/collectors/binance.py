@@ -303,14 +303,25 @@ class BinanceUsdmAdapter(ExchangeAdapter):
         return names
 
     async def subscribe(
-        self, symbols: Sequence[str], streams: Sequence[str]
+        self,
+        symbols: Sequence[str],
+        streams: Sequence[str],
+        *,
+        ws_client_kwargs: dict[str, Any] | None = None,
     ) -> AsyncIterator[RawMessage]:
-        """Yield raw combined-stream messages; reconnects handled inside."""
+        """Yield raw combined-stream messages; reconnects handled inside.
+
+        ws_client_kwargs override the adapter-level defaults per call — e.g. a
+        long heartbeat for legitimately quiet streams like forceOrder.
+        """
         if self._ws_connect is None:
             raise ValueError("ws_connect transport factory required for subscribe()")
         url = combined_ws_url(self.stream_names(symbols, streams), self._ws_base)
         client = ReconnectingWSClient(
-            url, self._ws_connect, clock=self._clock, **self._ws_client_kwargs
+            url,
+            self._ws_connect,
+            clock=self._clock,
+            **{**self._ws_client_kwargs, **(ws_client_kwargs or {})},
         )
         async for payload, ts_recv in client.messages():
             text = payload.decode() if isinstance(payload, bytes) else payload
