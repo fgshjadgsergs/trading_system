@@ -44,6 +44,8 @@ def trades_from_fills(fills: Sequence[Fill]) -> pl.DataFrame:
     avg = 0.0
     ts_open = 0
     for f in fills:
+        if f.qty < _EPS:
+            continue  # zero-qty fills carry no position change and no trade row
         q = f.qty if f.side is Side.BUY else -f.qty
         if abs(pos) < _EPS or pos * q > 0:
             if abs(pos) < _EPS:

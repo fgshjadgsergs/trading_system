@@ -39,8 +39,15 @@ class EwmaVol:
         self.n = 0
 
     def update(self, ret: float) -> float:
-        """Feed one per-bar return; returns the updated daily vol."""
-        r2 = float(ret) * float(ret)
+        """Feed one per-bar return; returns the updated daily vol.
+
+        Non-finite returns (NaN/inf from a broken feed) are ignored entirely:
+        one bad tick must not poison the estimator forever.
+        """
+        r = float(ret)
+        if not math.isfinite(r):
+            return self.daily_vol
+        r2 = r * r
         self._var = r2 if self._var is None else (1.0 - self.alpha) * self._var + self.alpha * r2
         self.n += 1
         return self.daily_vol
@@ -80,7 +87,14 @@ def vol_target_position_usd(
     estimator has no reliable information — the guard sizes to zero instead of
     exploding toward infinity (the conservative failure mode for a risk module).
     """
-    if equity <= 0 or target_daily_vol <= 0:
+    if (
+        not math.isfinite(equity)
+        or not math.isfinite(target_daily_vol)
+        or equity <= 0
+        or target_daily_vol <= 0
+    ):
+        # NaN compares False against <= 0, so finiteness is checked explicitly:
+        # garbage equity must size to zero, never to NaN or the cap.
         return 0.0, False, "non-positive equity or target vol"
     if not math.isfinite(realized_daily_vol) or realized_daily_vol <= vol_floor:
         return 0.0, False, "zero-vol guard: no reliable vol estimate"
