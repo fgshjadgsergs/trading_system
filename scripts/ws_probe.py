@@ -83,9 +83,17 @@ def _report(counts: Counter, samples: dict[str, str]) -> None:
         print(f"  [{kind}] {s}")
 
 
-async def probe_url(symbols: list[str], kinds: list[str], seconds: float) -> None:
-    adapter = BinanceUsdmAdapter()
-    url = combined_ws_url(adapter.stream_names(symbols, kinds))
+def _stream_params(symbols: list[str], kinds: list[str], streams: list[str] | None) -> list[str]:
+    """Explicit raw stream names win over kinds x symbols (контрольные тесты)."""
+    if streams:
+        return streams
+    return BinanceUsdmAdapter().stream_names(symbols, kinds)
+
+
+async def probe_url(
+    symbols: list[str], kinds: list[str], seconds: float, streams: list[str] | None = None
+) -> None:
+    url = combined_ws_url(_stream_params(symbols, kinds, streams))
     print(f"URL: {url}\nслушаю {seconds:.0f} секунд...")
     counts: Counter[str] = Counter()
     samples: dict[str, str] = {}
@@ -94,9 +102,10 @@ async def probe_url(symbols: list[str], kinds: list[str], seconds: float) -> Non
     _report(counts, samples)
 
 
-async def probe_subscribe(symbols: list[str], kinds: list[str], seconds: float) -> None:
-    adapter = BinanceUsdmAdapter()
-    params = adapter.stream_names(symbols, kinds)
+async def probe_subscribe(
+    symbols: list[str], kinds: list[str], seconds: float, streams: list[str] | None = None
+) -> None:
+    params = _stream_params(symbols, kinds, streams)
     url = f"{WS_BASE}/ws"
     print(f"URL: {url} (потоки НЕ в URL — подписка сообщением)\nслушаю {seconds:.0f} секунд...")
     counts: Counter[str] = Counter()
@@ -130,11 +139,45 @@ async def probe_raw(symbols: list[str], kinds: list[str], seconds: float) -> Non
     _report(counts, samples)
 
 
-async def probe(symbols: list[str], seconds: float, kinds: list[str], mode: str) -> None:
+def probe_tls(host: str = "fstream.binance.com", port: int = 443) -> None:
+    """Печатает издателя TLS-сертификата: MITM-антивирус/прокси виден сразу.
+
+    У настоящего Binance издатель — публичный CA (DigiCert/GlobalSign/…).
+    Если в issuer стоит Kaspersky/ESET/Avast/имя фирмы — трафик расшифровывает
+    локальный перехватчик, и именно он может резать типы потоков.
+    """
+    import socket
+    import ssl
+
+    ctx = ssl.create_default_context()
+    with socket.create_connection((host, port), timeout=10) as sock, ctx.wrap_socket(
+        sock, server_hostname=host
+    ) as tls:
+        cert = tls.getpeercert()
+    def flat(rdns: object) -> dict:
+        return {k: v for rdn in rdns for (k, v) in rdn}  # type: ignore[union-attr]
+
+    issuer, subject = flat(cert["issuer"]), flat(cert["subject"])
+    print(f"host:    {host}:{port}")
+    print(f"subject: {subject}")
+    print(f"issuer:  {issuer}")
+    print(f"годен до: {cert.get('notAfter')}")
+
+
+async def probe(
+    symbols: list[str],
+    seconds: float,
+    kinds: list[str],
+    mode: str,
+    streams: list[str] | None = None,
+) -> None:
+    if mode == "tls":
+        probe_tls()
+        return
     if mode == "url":
-        await probe_url(symbols, kinds, seconds)
+        await probe_url(symbols, kinds, seconds, streams)
     elif mode == "subscribe":
-        await probe_subscribe(symbols, kinds, seconds)
+        await probe_subscribe(symbols, kinds, seconds, streams)
     else:
         await probe_raw(symbols, kinds, seconds)
     print("\n(forceOrder редкий — его отсутствие в счётчиках нормально; "
@@ -155,11 +198,17 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         default="url",
-        choices=["url", "subscribe", "raw"],
-        help="способ подписки (см. докстринг)",
+        choices=["url", "subscribe", "raw", "tls"],
+        help="способ подписки; tls — только проверка издателя сертификата",
+    )
+    parser.add_argument(
+        "--streams",
+        nargs="+",
+        default=None,
+        help="сырые имена потоков вместо kinds x symbols, напр. ethusdt@bookTicker",
     )
     args = parser.parse_args()
-    asyncio.run(probe(args.symbols, args.seconds, args.kinds, args.mode))
+    asyncio.run(probe(args.symbols, args.seconds, args.kinds, args.mode, args.streams))
 
 
 if __name__ == "__main__":
