@@ -30,14 +30,16 @@ from trading_system.backtest import (
 from trading_system.backtest.metrics import cost_waterfall, summary
 from trading_system.book import BookReplayer
 from trading_system.book.reports import book_heatmap, spread_depth_figure
+from trading_system.collectors.brackets import bracket_liq_price_fn, load_brackets
 from trading_system.collectors.recorder import BatchWriter
 from trading_system.core.config import load_config, seed_everything
 from trading_system.core.io import read_stream, write_batch
-from trading_system.core.schema import Side, records_to_frame
+from trading_system.core.schema import Side, Trade, records_to_frame
 from trading_system.core.synth import (
     synth_book_stream,
     synth_mark_prices,
     synth_open_interest,
+    synth_ratios,
     synth_trades,
 )
 from trading_system.features import (
@@ -49,9 +51,14 @@ from trading_system.features import (
     with_cvd,
 )
 from trading_system.liqmap import HeatHistory, LiqMap, PriceBuckets, StaticWeights
+from trading_system.liqmap.sides import join_long_share
 from trading_system.profile import equal_extremes, fractal_swings, profile
 from trading_system.signals import s2_sweep_reversal, s3_filter
 from trading_system.signals.detectors import EVENT_SCHEMA
+from trading_system.spoof.lifecycle import BookState, LevelJournal
+from trading_system.spoof.metrics import annotate_episodes
+from trading_system.spoof.score import score_episodes
+from trading_system.spoof.walls import merge_zones, wall_zones_at
 from trading_system.viz import build_report, dist_plot, overlay_chart
 from trading_system.viz.style import PALETTE, apply_style, save_fig
 
@@ -75,7 +82,9 @@ def stage_record(lake: Path, symbol: str, seed: int, n_trades: int) -> None:
     book = synth_book_stream(n_diffs=1_500, symbol=symbol, start_ts=start, seed=seed)
     write_batch(lake, "book_snapshot", records_to_frame([book.snapshot], "book_snapshot"))
     write_batch(lake, "depth_diff", records_to_frame(book.diffs, "depth_diff"))
-    log.info("record.done", trades=len(trades), oi=len(oi), diffs=len(book.diffs))
+    ratios = synth_ratios(symbol=symbol, start_ts=start, n=300, step_s=300, seed=seed)
+    write_batch(lake, "ratio", records_to_frame(ratios, "ratio"))
+    log.info("record.done", trades=len(trades), oi=len(oi), diffs=len(book.diffs), ratios=len(ratios))
 
 
 # -- stage 2: стакан ----------------------------------------------------------
@@ -107,18 +116,30 @@ def stage_features(lake: Path, symbol: str, timeframe: str) -> tuple[pl.DataFram
     return trades, bars
 
 
-def stage_map(bars: pl.DataFrame, cfg: dict) -> tuple[LiqMap, HeatHistory]:
+def stage_map(
+    bars: pl.DataFrame,
+    cfg: dict,
+    symbol: str,
+    ratios: pl.DataFrame | None = None,
+    brackets_path: str | None = None,
+) -> tuple[LiqMap, HeatHistory]:
     lm_cfg = cfg["liqmap"]
     atr = float(bars["atr"].drop_nulls().median())
     grid = [float(x) for x in lm_cfg["leverage_grid"]]
     weights = np.array([1, 2, 4, 6, 5, 4, 2, 2, 1], dtype=float)[: len(grid)]
+    liq_fn = None
+    if brackets_path:  # track B1: real per-symbol margin tiers instead of flat MMR
+        liq_fn = bracket_liq_price_fn(load_brackets(brackets_path), symbol)
     lm = LiqMap(
         leverage_grid=grid,
         buckets=PriceBuckets.from_atr(atr, float(lm_cfg["bucket_atr_fraction"])),
         weight_fn=StaticWeights(weights),
+        liq_price_fn=liq_fn,
         long_share=float(lm_cfg["long_share_default"]),
         decay_half_life_s=float(lm_cfg["decay_half_life_s"]),
     )
+    if ratios is not None and ratios.height:  # track B2: causal per-bar side shares
+        bars = join_long_share(bars, ratios)
     hist = HeatHistory(lm)
     for row in bars.iter_rows(named=True):
         d_oi = row["d_oi_usd"]
@@ -130,9 +151,16 @@ def stage_map(bars: pl.DataFrame, cfg: dict) -> tuple[LiqMap, HeatHistory]:
             bar_close=row["close"],
             d_oi_usd=d_oi,
             dt_s=(row["ts_close"] - row["ts_open"]) / 1e9,
+            long_share=row.get("long_share"),
         )
         hist.record(row["ts_close"])
-    log.info("map.done", total_heat=round(lm.total_heat()), snapshots=len(hist))
+    log.info(
+        "map.done",
+        total_heat=round(lm.total_heat()),
+        snapshots=len(hist),
+        brackets=bool(brackets_path),
+        ratio_shares=ratios is not None and ratios.height > 0,
+    )
     return lm, hist
 
 
@@ -176,9 +204,18 @@ def causal_s1_events(
 
 
 def causal_s3_filter(
-    events: pl.DataFrame, bars: pl.DataFrame, hist: HeatHistory, dense_quantile: float
+    events: pl.DataFrame,
+    bars: pl.DataFrame,
+    hist: HeatHistory,
+    dense_quantile: float,
+    walls: pl.DataFrame | None = None,
+    wall_band: float = 0.0,
 ) -> pl.DataFrame:
-    """S3 veto per event against the map snapshot CONCURRENT with that event."""
+    """S3 veto per event against the map snapshot CONCURRENT with that event.
+
+    With `walls` (scored M6 episodes), stability-weighted wall zones as of the
+    event moment join the map zones — track B3.
+    """
     if events.is_empty():
         return s3_filter(events, pl.DataFrame({"lo": [], "hi": [], "heat_usd": []}))
     index_of_ts = {int(t): i for i, t in enumerate(bars["ts_close"].to_list())}
@@ -191,11 +228,55 @@ def causal_s3_filter(
         else:
             lo, hi, heat = hist.zones_at(i)
             zones = pl.DataFrame({"lo": lo, "hi": hi, "heat_usd": heat})
+        if walls is not None and walls.height and wall_band > 0:
+            zones = merge_zones(zones, wall_zones_at(walls, ev["ts"], band=wall_band))
         parts.append(s3_filter(one, zones, dense_quantile=dense_quantile))
     return pl.concat(parts).sort("ts")
 
 
-def stage_signals(bars: pl.DataFrame, hist: HeatHistory, cfg: dict) -> pl.DataFrame:
+def stage_walls(lake: Path, symbol: str) -> pl.DataFrame | None:
+    """Scored level episodes from the recorded book + tape (M6 -> S3 zones)."""
+    snap = read_stream(lake, "book_snapshot", symbol=symbol)
+    diffs = read_stream(lake, "depth_diff", symbol=symbol)
+    if snap.is_empty() or diffs.is_empty():
+        return None
+    replayer = BookReplayer.from_frames(snap, diffs)
+    states = []
+    for ts, book in replayer.replay():
+        bids, asks = book.top_n(20)
+        states.append(BookState(ts=ts, bids=bids, asks=asks))
+    if not states:
+        return None
+    lo_ts, hi_ts = states[0].ts, states[-1].ts
+    tape = [
+        Trade(
+            exchange=r["exchange"],
+            symbol=r["symbol"],
+            ts_event=r["ts_event"],
+            ts_recv=r["ts_recv"],
+            price=r["price"],
+            qty=r["qty"],
+            qty_usd=r["qty_usd"],
+            side=Side(r["side"]),
+            trade_id=r["trade_id"],
+        )
+        for r in read_stream(
+            lake, "trade", symbol=symbol, ts_from=lo_ts, ts_to=hi_ts + 1
+        ).iter_rows(named=True)
+    ]
+    journal = LevelJournal().run(states, tape)
+    episodes = score_episodes(annotate_episodes(journal))
+    log.info("walls.done", states=len(states), episodes=episodes.height)
+    return episodes
+
+
+def stage_signals(
+    bars: pl.DataFrame,
+    hist: HeatHistory,
+    cfg: dict,
+    walls: pl.DataFrame | None = None,
+    wall_band: float = 0.0,
+) -> pl.DataFrame:
     s_cfg = cfg["signals"]
     # eps scale from the EARLY window's ATR — no full-sample statistics
     warmup_atr = float(bars["atr"].drop_nulls().head(50).median())
@@ -210,7 +291,12 @@ def stage_signals(bars: pl.DataFrame, hist: HeatHistory, cfg: dict) -> pl.DataFr
     ev2 = s2_sweep_reversal(bars, clusters, return_bars=int(s_cfg["s2_sweep_return_bars"]))
     events = pl.concat([e for e in (ev1, ev2) if e.height]) if (ev1.height or ev2.height) else ev1
     events = causal_s3_filter(
-        events, bars, hist, dense_quantile=float(s_cfg["s3_dense_zone_quantile"])
+        events,
+        bars,
+        hist,
+        dense_quantile=float(s_cfg["s3_dense_zone_quantile"]),
+        walls=walls,
+        wall_band=wall_band,
     )
     log.info(
         "signals.done",
@@ -299,6 +385,7 @@ def main() -> None:
     parser.add_argument("--out", default="reports", help="report output dir")
     parser.add_argument("--n-trades", type=int, default=150_000)
     parser.add_argument("--timeframe", default="5m")
+    parser.add_argument("--brackets", default=None, help="json with per-symbol leverage brackets")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -318,8 +405,10 @@ def main() -> None:
     figures: list[tuple[Path, str]] = []
     figures += stage_book(lake, args.symbol, out)
     trades, bars = stage_features(lake, args.symbol, args.timeframe)
-    lm, hist = stage_map(bars, cfg)
-    events = stage_signals(bars, hist, cfg)
+    ratios = read_stream(lake, "ratio", symbol=args.symbol)
+    lm, hist = stage_map(bars, cfg, args.symbol, ratios=ratios, brackets_path=args.brackets)
+    walls = stage_walls(lake, args.symbol)
+    events = stage_signals(bars, hist, cfg, walls=walls, wall_band=lm.buckets.bucket_size)
     span = float(bars["high"].max() - bars["low"].min())
     prof = profile(trades, bin_size=span / 60)
     final_pools = pl.DataFrame({"price": [p for p, _ in hist.pools_at(len(hist) - 1, k=8)]})

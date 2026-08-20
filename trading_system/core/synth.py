@@ -17,6 +17,7 @@ from trading_system.core.schema import (
     Liquidation,
     MarkPrice,
     OpenInterest,
+    RatioPoint,
     Side,
     Trade,
 )
@@ -196,6 +197,42 @@ def synth_open_interest(
         )
         for i in range(n)
     ]
+
+
+def synth_ratios(
+    symbol: str = "BTCUSDT",
+    start_ts: int = 1_755_600_000 * NS_PER_S,
+    n: int = 100,
+    step_s: int = 300,
+    seed: int = 42,
+) -> list[RatioPoint]:
+    """Three L/S ratio metrics as slow AR(1) walks of the long share around 0.5."""
+    rng = np.random.default_rng(seed)
+    out: list[RatioPoint] = []
+    share = {m: 0.5 for m in ("global_ls_account", "top_ls_position", "taker_ls")}
+    for i in range(n):
+        ts = start_ts + i * step_s * NS_PER_S
+        for metric, offset in (
+            ("global_ls_account", 0.0),
+            ("top_ls_position", 0.02),
+            ("taker_ls", -0.02),
+        ):
+            s = share[metric]
+            s = float(np.clip(0.5 + 0.9 * (s - 0.5) + rng.normal(0, 0.02) + offset * 0.1, 0.05, 0.95))
+            share[metric] = s
+            out.append(
+                RatioPoint(
+                    exchange=EXCHANGE,
+                    symbol=symbol,
+                    ts_event=ts,
+                    ts_recv=ts + 50 * NS_PER_MS,
+                    metric=metric,
+                    long_share=s,
+                    short_share=1.0 - s,
+                    ratio=s / (1.0 - s),
+                )
+            )
+    return out
 
 
 def synth_mark_prices(

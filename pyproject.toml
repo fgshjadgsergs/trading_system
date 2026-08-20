@@ -31,6 +31,7 @@ dev = [
 ]
 accel = ["numba>=0.59"]
 crosscheck = ["vectorbt"]
+boost = ["lightgbm>=4"]
 
 [tool.setuptools.packages.find]
 include = ["trading_system*"]

@@ -1,0 +1,22 @@
+[
+ {
+  "symbol": "BTCUSDT",
+  "notionalCoef": 1.0,
+  "brackets": [
+   {"bracket": 1, "initialLeverage": 125, "notionalCap": 50000, "notionalFloor": 0, "maintMarginRatio": 0.004, "cum": 0.0},
+   {"bracket": 2, "initialLeverage": 100, "notionalCap": 250000, "notionalFloor": 50000, "maintMarginRatio": 0.005, "cum": 50.0},
+   {"bracket": 3, "initialLeverage": 50, "notionalCap": 1000000, "notionalFloor": 250000, "maintMarginRatio": 0.01, "cum": 1300.0},
+   {"bracket": 4, "initialLeverage": 20, "notionalCap": 10000000, "notionalFloor": 1000000, "maintMarginRatio": 0.025, "cum": 16300.0},
+   {"bracket": 5, "initialLeverage": 10, "notionalCap": 20000000, "notionalFloor": 10000000, "maintMarginRatio": 0.05, "cum": 266300.0}
+  ]
+ },
+ {
+  "symbol": "SOLUSDT",
+  "notionalCoef": 1.0,
+  "brackets": [
+   {"bracket": 1, "initialLeverage": 50, "notionalCap": 10000, "notionalFloor": 0, "maintMarginRatio": 0.01, "cum": 0.0},
+   {"bracket": 2, "initialLeverage": 25, "notionalCap": 100000, "notionalFloor": 10000, "maintMarginRatio": 0.025, "cum": 150.0},
+   {"bracket": 3, "initialLeverage": 10, "notionalCap": 1000000, "notionalFloor": 100000, "maintMarginRatio": 0.05, "cum": 2650.0}
+  ]
+ }
+]
