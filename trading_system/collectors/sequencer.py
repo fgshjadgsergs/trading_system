@@ -13,6 +13,7 @@ sequencer never silently continues over a hole in the stream.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -53,7 +54,7 @@ class DepthSequencer:
         self._on_gap = on_gap
         self._on_resync = on_resync
         self._max_buffer = max_buffer
-        self._buffer: list[DepthDiff] = []
+        self._buffer: deque[DepthDiff] = deque()  # deque: O(1) drop-oldest on overflow
         self._synced = False
         self._awaiting_first = False
         self._last_u = -1
@@ -88,7 +89,8 @@ class DepthSequencer:
         self._last_u = snap.last_update_id
         self._synced = True
         self._awaiting_first = True
-        pending, self._buffer = self._buffer, []
+        pending = list(self._buffer)
+        self._buffer.clear()
         ready: list[DepthDiff] = []
         for i, d in enumerate(pending):
             ready.extend(self._process(d))
@@ -101,7 +103,7 @@ class DepthSequencer:
     # ------------------------------------------------------------------ #
     def _buffer_diff(self, diff: DepthDiff) -> None:
         if len(self._buffer) >= self._max_buffer:
-            dropped = self._buffer.pop(0)
+            dropped = self._buffer.popleft()
             log.warning(
                 "seq_buffer_overflow", symbol=self.symbol, dropped_u=dropped.final_update_id
             )

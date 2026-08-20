@@ -7,6 +7,7 @@ live recorder or from a normalized data.binance.vision archive.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import duckdb
@@ -43,7 +44,11 @@ def write_batch(root: Path, stream: str, frame: pl.DataFrame) -> list[Path]:
         d.mkdir(parents=True, exist_ok=True)
         n = len(list(d.glob("part-*.parquet")))
         path = d / f"part-{n:05d}.parquet"
-        part.drop("_hour_bucket").write_parquet(path)
+        # write to a dot-prefixed tmp (invisible to part-*.parquet globs), then
+        # atomically publish: a crash mid-write never leaves a readable partial
+        tmp = d / f".{path.name}.tmp"
+        part.drop("_hour_bucket").write_parquet(tmp)
+        os.replace(tmp, path)
         written.append(path)
     return written
 
