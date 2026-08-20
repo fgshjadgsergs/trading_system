@@ -4,9 +4,9 @@ One command (needs network access to data.binance.vision):
 
     PYTHONPATH=. python3 scripts/real_heatmap.py --symbol ETHUSDT --days 3
 
-Downloads aggTrades + metrics (open interest, L/S ratios) + liquidationSnapshot
-daily archives via scripts/download_vision.py, ingests them into a parquet
-lake, drives the liquidation map bar-by-bar with causal ratio-derived side
+Downloads aggTrades + metrics (open interest, L/S ratios) daily archives via
+scripts/download_vision.py (liquidation prints exist only in live forceOrder
+recordings — Vision has no such dataset), ingests them into a parquet lake, drives the liquidation map bar-by-bar with causal ratio-derived side
 shares, and saves two figures into reports/:
 
     <symbol>_real_heat_overlay.png  — candles + H(time x price) + real
@@ -41,7 +41,7 @@ from trading_system.viz.style import PALETTE, apply_style, save_fig
 
 log = structlog.get_logger()
 
-KINDS = ["aggTrades", "metrics", "liquidationSnapshot"]
+KINDS = ["aggTrades", "metrics"]  # liquidationSnapshot не существует на Vision
 
 
 def bars_from_klines(klines: pl.DataFrame, timeframe: str) -> pl.DataFrame:

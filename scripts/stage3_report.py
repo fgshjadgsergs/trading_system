@@ -9,9 +9,10 @@ scores naive vs static (optionally rolling) STRICTLY out-of-sample with an
 embargo gap, runs the reversal and magnet event studies on the test window,
 and writes reports/stage3-<symbol>/README.md with an explicit verdict.
 
-Ground truth = real liquidation prints from Vision liquidationSnapshot
-archives. Days without that archive carry no truth; if the whole range lacks
-it, the verdict is "нет данных" — record forceOrder live or pick другой период.
+Ground truth = real liquidation prints. Vision does NOT publish them (the
+S3 listing has no liquidationSnapshot dataset), so the truth comes from a
+live forceOrder recording: run scripts/record_live.py, then point --lake at
+that lake with --skip-download. Without prints the verdict is "нет данных".
 """
 
 from __future__ import annotations
@@ -58,7 +59,9 @@ from trading_system.viz.templates import event_study_plot
 
 log = structlog.get_logger()
 
-KINDS = ["klines", "metrics", "liquidationSnapshot"]
+# liquidationSnapshot удалён: датасета нет на Vision (S3-листинг, 20.08.2026);
+# истина о ликвидациях приходит только из живой записи forceOrder (record_live)
+KINDS = ["klines", "metrics"]
 NS_PER_DAY = 86_400 * NS_PER_S
 
 
