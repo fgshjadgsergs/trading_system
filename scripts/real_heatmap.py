@@ -36,7 +36,7 @@ from trading_system.core.config import load_config, seed_everything
 from trading_system.core.io import read_stream
 from trading_system.core.timeutils import TIMEFRAME_NS
 from trading_system.features import join_open_interest, time_bars, with_atr, with_cvd
-from trading_system.viz.overlay import overlay_chart
+from trading_system.liqmap.terminal import terminal_heat_overlay
 from trading_system.viz.style import PALETTE, apply_style, save_fig
 
 log = structlog.get_logger()
@@ -93,13 +93,12 @@ def build_heatmap(
     bars = with_atr(join_open_interest(bars, oi), period=14)
     lm, hist = stage_map(bars, cfg, symbol, ratios=ratios, brackets_path=brackets_path)
 
-    name = f"{symbol.lower()}_real_heat_overlay"
-    p1 = overlay_chart(
+    p1 = terminal_heat_overlay(
         bars,
-        heat=hist.matrix(),
-        name=name,
+        hist,
+        name=f"{symbol.lower()}_real_heat_overlay",
         out_dir=out,
-        title=f"{symbol}: реальные данные — свечи + карта ликвидаций",
+        title=f"{symbol} · карта ликвидаций (реальные данные, log-шкала тепла)",
     )
     if liqs.height:  # real liquidation prints on top of the heat
         idx_of_ts = bars["ts_open"].to_numpy()

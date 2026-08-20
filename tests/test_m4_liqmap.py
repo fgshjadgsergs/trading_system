@@ -265,3 +265,12 @@ def test_demo_reports(tmp_path):
     assert len(paths) == 2
     for p in paths:
         assert p.exists() and p.stat().st_size > 5_000
+
+
+def test_terminal_overlay_renders(tmp_path):
+    from trading_system.liqmap.reports import build_demo_map
+    from trading_system.liqmap.terminal import terminal_heat_overlay
+
+    bars, lm, hist = build_demo_map(seed=42)
+    p = terminal_heat_overlay(bars, hist, name="terminal_test", out_dir=tmp_path)
+    assert p.exists() and p.stat().st_size > 20_000
