@@ -11,6 +11,7 @@ which matches the exchange calculator's (WB + cum -/+ q*E) / (q*(MMR -/+ 1)).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from trading_system.core.adapter import LiquidationFormula
@@ -40,6 +41,8 @@ DEFAULT_BRACKETS: tuple[MarginBracket, ...] = (
 
 
 def bracket_for(notional_usd: float, brackets: tuple[MarginBracket, ...]) -> MarginBracket:
+    if not brackets:
+        raise ValueError("empty bracket table")
     for b in brackets:
         if notional_usd <= b.max_notional_usd:
             return b
@@ -55,10 +58,16 @@ def liq_price(
     qty: float = 1.0,
 ) -> float:
     """Isolated liquidation price with an explicit maintenance margin rate."""
-    if entry <= 0 or leverage <= 0 or qty <= 0:
-        raise ValueError("entry, leverage and qty must be positive")
+    # `not >` instead of `<=` so NaN inputs raise instead of silently
+    # clamping the long liquidation price to 0.0 via max(0.0, nan)
+    if not (entry > 0 and math.isfinite(entry)):
+        raise ValueError("entry must be positive and finite")
+    if not (leverage > 0 and math.isfinite(leverage)) or not (qty > 0 and math.isfinite(qty)):
+        raise ValueError("leverage and qty must be positive and finite")
     if not 0 <= mmr < 1:
         raise ValueError("mmr must be in [0, 1)")
+    if not (cum >= 0 and math.isfinite(cum)):
+        raise ValueError("cum must be >= 0 and finite")
     if side is Side.BUY:  # long
         return max(0.0, (entry * (1 - 1 / leverage) - cum / qty) / (1 - mmr))
     return (entry * (1 + 1 / leverage) + cum / qty) / (1 + mmr)

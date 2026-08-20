@@ -14,6 +14,7 @@ simply ignores the context argument (stage-3 calibrators plug in here).
 from __future__ import annotations
 
 import inspect
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -45,8 +46,8 @@ class StaticWeights:
 
     def __init__(self, weights: np.ndarray) -> None:
         w = np.asarray(weights, dtype=float)
-        if w.ndim != 1 or (w < 0).any() or w.sum() <= 0:
-            raise ValueError("weights must be a non-negative 1-d vector with positive sum")
+        if w.ndim != 1 or not np.isfinite(w).all() or (w < 0).any() or w.sum() <= 0:
+            raise ValueError("weights must be a finite non-negative 1-d vector with positive sum")
         self._w = w / w.sum()
 
     def __call__(self, context: Context | None = None) -> np.ndarray:
@@ -83,6 +84,8 @@ class LiqMap:
     ) -> None:
         if not 0 <= long_share <= 1:
             raise ValueError("long_share in [0, 1]")
+        if not decay_half_life_s > 0:  # `not >` rejects NaN too; +inf = no decay
+            raise ValueError("decay_half_life_s must be positive")
         self.leverage_grid = np.asarray(leverage_grid, dtype=float)
         self.buckets = buckets
         self.weight_fn = weight_fn
@@ -120,17 +123,23 @@ class LiqMap:
         `long_share` overrides the instance default for this increment —
         the hook for time-varying shares derived from the ratio streams.
         """
+        if not math.isfinite(d_oi_usd):
+            raise ValueError("d_oi_usd must be finite")
         if d_oi_usd == 0.0:
             return
         if d_oi_usd < 0.0:
             self._remove_proportional(-d_oi_usd)
             return
+        if not (math.isfinite(price) and price > 0):
+            raise ValueError("price must be positive and finite")
         ls = self.long_share if long_share is None else long_share
         if not 0 <= ls <= 1:
             raise ValueError("long_share in [0, 1]")
-        w = self.weight_fn(context)
+        w = np.asarray(self.weight_fn(context), dtype=float)
         if len(w) != len(self.leverage_grid):
             raise ValueError("weight vector length != leverage grid length")
+        if not np.isfinite(w).all() or (w < 0).any():
+            raise ValueError("weight vector must be finite and non-negative")
         for side, share in ((Side.BUY, ls), (Side.SELL, 1.0 - ls)):
             if share == 0.0:
                 continue
@@ -171,8 +180,8 @@ class LiqMap:
         A long pool at price p triggers once price trades down to p, a short
         pool once price trades up to p — both mean p in [lo, hi].
         """
-        if path_lo > path_hi:
-            raise ValueError("path_lo > path_hi")
+        if not path_lo <= path_hi:  # `not <=` also rejects NaN bounds (broken bar)
+            raise ValueError("path_lo > path_hi (or NaN path bound)")
         taken = 0.0
         for side_heat in self.heat.values():
             for idx in list(side_heat):
@@ -185,8 +194,8 @@ class LiqMap:
 
     def decay(self, dt_s: float) -> float:
         """Exponential half-life decay of all heat; returns the decayed mass."""
-        if dt_s < 0:
-            raise ValueError("dt_s must be >= 0")
+        if not dt_s >= 0:  # `not >=` also rejects NaN, which would poison all heat
+            raise ValueError("dt_s must be >= 0 (and not NaN)")
         keep = 0.5 ** (dt_s / self.decay_half_life_s)
         lost = 0.0
         for side_heat in self.heat.values():

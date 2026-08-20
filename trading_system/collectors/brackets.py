@@ -83,6 +83,7 @@ def load_brackets(path: str | Path) -> BracketTables:
             for b in sorted(rows, key=lambda r: float(r["notionalCap"]))
         )
         for sym, rows in doc.items()
+        if rows  # mirror parse_leverage_brackets: empty tables are dropped
     }
 
 

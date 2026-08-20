@@ -508,7 +508,13 @@ class ContextualWeights:
         x = np.asarray(x, dtype=float)
         if x.ndim != 2 or x.shape[1] != self.n_features:
             raise ValueError("X must be (n_samples, n_features)")
+        if len(x) == 0:
+            raise ValueError("X must contain at least one sample")
+        if not np.isfinite(x).all():
+            raise ValueError("X contains NaN/inf values")
         y = np.asarray(y, dtype=float)
+        if not np.isfinite(y).all():
+            raise ValueError("Y contains NaN/inf values")
         if y.ndim == 1:
             hot = np.zeros((len(y), self.n_classes))
             hot[np.arange(len(y)), y.astype(int)] = 1.0

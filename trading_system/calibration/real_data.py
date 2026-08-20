@@ -98,6 +98,9 @@ def make_real_heat_builder(
     nb = len(edges) - 1
     decay = 0.5 ** (bar_s / decay_half_life_s)
 
+    # bucket -1 == no allocation: LiqMap drops lp <= 0 (e.g. 1x longs that can
+    # never liquidate above zero), so the fast builder must not park that mass
+    # in the bottom edge bucket
     bucket_of = np.empty((n, k, 2), dtype=int)
     for t in range(n):
         entry = arr.close[t]
@@ -109,8 +112,11 @@ def make_real_heat_builder(
                     lp = liq_fn(entry, float(grid[j]), side, max(qty, 1e-12))
                 else:
                     lp = liq_price(entry, float(grid[j]), side, mmr)
-                b = int(np.searchsorted(edges, lp, side="right") - 1)
-                bucket_of[t, j, si] = min(max(b, 0), nb - 1)
+                if lp > 0.0 and np.isfinite(lp):
+                    b = int(np.searchsorted(edges, lp, side="right") - 1)
+                    bucket_of[t, j, si] = min(max(b, 0), nb - 1)
+                else:
+                    bucket_of[t, j, si] = -1
 
     cross_lo = np.empty(n, dtype=int)
     cross_hi = np.empty(n, dtype=int)
@@ -135,8 +141,10 @@ def make_real_heat_builder(
                 shares = (arr.long_share[t], 1.0 - arr.long_share[t])
                 for j in range(k):
                     contrib = usd * wm[t, j]
-                    row[bucket_of[t, j, 0]] += contrib * shares[0]
-                    row[bucket_of[t, j, 1]] += contrib * shares[1]
+                    for si in (0, 1):
+                        b = bucket_of[t, j, si]
+                        if b >= 0:
+                            row[b] += contrib * shares[si]
             elif usd < 0.0:
                 total = row.sum()
                 if total > 0.0:
