@@ -40,6 +40,8 @@ reports/       — png-отчёты каждого модуля
 | `scripts/record_live.py` | Live-сбор (этап 1.1): WS depth/aggTrade/forceOrder/markPrice/kline + REST OI/ратио → parquet-лейк, ресинк книги по U/u/pu |
 | `scripts/download_vision.py` | Массовая загрузка data.binance.vision с проверкой чексумм, нормализация в единую схему, каталог датасетов |
 | `scripts/quality_report.py` | Ежедневный отчёт качества: аптайм, гэпы, гистограммы задержек |
+| `scripts/real_heatmap.py` | Терминальная теплокарта ликвидаций на реальных данных Vision |
+| `scripts/stage3_report.py` | Gate A/B: калибровка весов и event studies на реальных ликвидациях, отчёт с вердиктом |
 
 ## Запуск
 
