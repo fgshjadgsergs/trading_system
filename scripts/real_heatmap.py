@@ -27,12 +27,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import matplotlib.pyplot as plt
 import numpy as np
+import polars as pl
 import structlog
 
 import scripts.download_vision as dv
 from scripts.run_pipeline import stage_map
 from trading_system.core.config import load_config, seed_everything
 from trading_system.core.io import read_stream
+from trading_system.core.timeutils import TIMEFRAME_NS
 from trading_system.features import join_open_interest, time_bars, with_atr, with_cvd
 from trading_system.viz.overlay import overlay_chart
 from trading_system.viz.style import PALETTE, apply_style, save_fig
@@ -40,6 +42,25 @@ from trading_system.viz.style import PALETTE, apply_style, save_fig
 log = structlog.get_logger()
 
 KINDS = ["aggTrades", "metrics", "liquidationSnapshot"]
+
+
+def bars_from_klines(klines: pl.DataFrame, timeframe: str) -> pl.DataFrame:
+    """Kline stream rows of the requested interval -> bar frame for the map.
+
+    The lake may hold several intervals; rows are picked by bar duration
+    (tolerant to the exchange's close = open + step - 1ms convention) and
+    ts_close is normalized to the exclusive-end convention.
+    """
+    step = TIMEFRAME_NS[timeframe]
+    dur = pl.col("ts_close") - pl.col("ts_open")
+    picked = klines.filter((dur >= step - 2_000_000) & (dur <= step))
+    if picked.is_empty():
+        return picked
+    return (
+        picked.with_columns((pl.col("ts_open") + step).alias("ts_close"))
+        .unique(subset=["symbol", "ts_open"], keep="first")
+        .sort("symbol", "ts_open")
+    )
 
 
 def build_heatmap(
@@ -51,13 +72,25 @@ def build_heatmap(
     brackets_path: str | None = None,
 ) -> list[Path]:
     """Bars + map + figures from an already-ingested lake (offline part)."""
-    trades = read_stream(lake, "trade", symbol=symbol)
-    if trades.is_empty():
-        raise SystemExit(f"lake has no trades for {symbol} — run the download step first")
     oi = read_stream(lake, "open_interest", symbol=symbol)
     ratios = read_stream(lake, "ratio", symbol=symbol)
     liqs = read_stream(lake, "liquidation", symbol=symbol)
-    bars = with_atr(join_open_interest(with_cvd(time_bars(trades, timeframe)), oi), period=14)
+    trades = read_stream(lake, "trade", symbol=symbol)
+    if trades.height:
+        bars = with_cvd(time_bars(trades, timeframe))
+        log.info("bars.source", source="aggTrades", rows=trades.height)
+    else:
+        # aggTrades archive missing/failed — klines carry everything the map
+        # needs (OHLC path, quote volume) at a fraction of the size
+        klines = read_stream(lake, "kline", symbol=symbol)
+        bars = bars_from_klines(klines, timeframe)
+        if bars.is_empty():
+            raise SystemExit(
+                f"lake has neither trades nor {timeframe} klines for {symbol} — "
+                "run the download step first"
+            )
+        log.info("bars.source", source=f"klines_{timeframe}", rows=bars.height)
+    bars = with_atr(join_open_interest(bars, oi), period=14)
     lm, hist = stage_map(bars, cfg, symbol, ratios=ratios, brackets_path=brackets_path)
 
     name = f"{symbol.lower()}_real_heat_overlay"
@@ -146,7 +179,8 @@ def main(argv: list[str] | None = None, fetch=None) -> None:
         dv_args = [
             "--lake", str(lake),
             "--symbols", args.symbol,
-            "--kinds", *KINDS,
+            "--kinds", *KINDS, "klines",
+            "--intervals", args.timeframe,
             "--start", start.strftime("%Y-%m-%d"),
             "--end", end.strftime("%Y-%m-%d"),
         ]
