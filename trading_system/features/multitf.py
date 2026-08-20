@@ -32,7 +32,8 @@ def tf_features(
     """Per-bar features of one timeframe.
 
     The z-score baseline is the PREVIOUS `zscore_window` bars (shifted by one)
-    so a bar never normalizes against itself.
+    so a bar never normalizes against itself. A zero-variance baseline yields
+    a null vol_z (never inf).
     """
     bars = time_bars(trades, timeframe)
     if oi is not None and oi.height > 0:
@@ -49,7 +50,11 @@ def tf_features(
     base_std = qv.shift(1).rolling_std(zscore_window, min_samples=8).over("exchange", "symbol")
     return (
         bars.with_columns(
-            ((qv - base_mean) / base_std).alias("vol_z"),
+            # sigma=0 baseline (identical volumes) must not divide: z undefined
+            pl.when(base_std > 0)
+            .then((qv - base_mean) / base_std)
+            .otherwise(None)
+            .alias("vol_z"),
             (pl.col("taker_buy_quote_volume") / qv).alias("taker_buy_share"),
             (qv > base_mean + impulse_k * base_std).fill_null(False).alias("impulse"),
             pl.lit(timeframe).alias("tf"),
