@@ -19,6 +19,7 @@ import argparse
 import datetime as dt
 import sys
 import urllib.request
+from functools import partial
 from pathlib import Path
 
 import structlog
@@ -38,10 +39,20 @@ from trading_system.collectors.vision import (
 log = structlog.get_logger("download_vision")
 
 
-def urllib_fetch(url: str, timeout: float = 60.0) -> bytes:
-    """Default network transport: plain GET returning the response body."""
+def urllib_fetch(url: str, timeout: float = 300.0) -> bytes:
+    """Default network transport: chunked GET returning the response body.
+
+    `timeout` is the per-socket-operation limit; reading in 1 MiB chunks keeps
+    a slow-but-alive download of a multi-hundred-MB archive from tripping it.
+    """
     with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
-        return resp.read()
+        chunks: list[bytes] = []
+        while True:
+            chunk = resp.read(1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -55,6 +66,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument("--symbols", nargs="+", required=True, help="e.g. BTCUSDT SOLUSDT")
     p.add_argument("--kinds", nargs="+", choices=sorted(KINDS), required=True)
+    p.add_argument(
+        "--timeout", type=float, default=300.0, help="per-socket-read timeout, seconds"
+    )
     p.add_argument("--start", type=dt.date.fromisoformat, required=True, help="YYYY-MM-DD")
     p.add_argument("--end", type=dt.date.fromisoformat, required=True, help="YYYY-MM-DD")
     p.add_argument("--period", choices=("daily", "monthly"), default="daily")
@@ -98,7 +112,8 @@ def _ingest(results: list[DownloadResult], lake_root: Path, *, reingest: bool) -
 
 def main(argv: list[str] | None = None, fetch: FetchFn | None = None) -> int:
     args = parse_args(argv)
-    fetch = fetch or urllib_fetch
+    if fetch is None:
+        fetch = partial(urllib_fetch, timeout=args.timeout)
     archive_dir = args.archive_dir or (args.lake / "_archive")
     items = plan_downloads(
         symbols=args.symbols,
