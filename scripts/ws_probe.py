@@ -23,11 +23,11 @@ from trading_system.collectors.binance import BinanceUsdmAdapter
 WS_STREAMS = ["depth", "agg_trade", "force_order", "mark_price", "kline_1m"]
 
 
-async def probe(symbols: list[str], seconds: float) -> None:
+async def probe(symbols: list[str], seconds: float, kinds: list[str] | None = None) -> None:
     adapter = BinanceUsdmAdapter()
     from trading_system.collectors.binance import combined_ws_url
 
-    url = combined_ws_url(adapter.stream_names(symbols, WS_STREAMS))
+    url = combined_ws_url(adapter.stream_names(symbols, kinds or WS_STREAMS))
     print(f"URL: {url}\nслушаю {seconds:.0f} секунд...")
     counts: Counter[str] = Counter()
     async with websockets.connect(url, max_size=None) as ws:
@@ -60,8 +60,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbols", nargs="+", default=["ETHUSDT", "BTCUSDT", "SOLUSDT"])
     parser.add_argument("--seconds", type=float, default=15.0)
+    parser.add_argument(
+        "--kinds",
+        nargs="+",
+        default=WS_STREAMS,
+        choices=WS_STREAMS,
+        help="какие виды потоков подписать (для теста лимита на combined-URL)",
+    )
     args = parser.parse_args()
-    asyncio.run(probe(args.symbols, args.seconds))
+    asyncio.run(probe(args.symbols, args.seconds, args.kinds))
 
 
 if __name__ == "__main__":

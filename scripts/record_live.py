@@ -138,8 +138,11 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
 
     flush_task = asyncio.create_task(flush_gaps_periodically())
 
-    try:
-        async for raw in adapter.subscribe(symbols, WS_STREAMS):
+    async def consume_stream(kind: str) -> None:
+        # One connection per stream kind: gateways have been observed to honor
+        # only the first streams of a wide combined subscription (20.08.2026),
+        # and per-kind sockets also isolate reconnects between streams.
+        async for raw in adapter.subscribe(symbols, [kind]):
             for rec in adapter.normalize(raw):
                 name = type(rec).__name__
                 rec_counts[name] = rec_counts.get(name, 0) + 1
@@ -154,7 +157,13 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
                     writer.add(rec)
                 else:
                     writer.add(rec)
+
+    ws_tasks = [asyncio.create_task(consume_stream(k)) for k in WS_STREAMS]
+    try:
+        await asyncio.gather(*ws_tasks)
     finally:
+        for t in ws_tasks:
+            t.cancel()
         flush_task.cancel()
         for t in poller_tasks:
             t.cancel()
