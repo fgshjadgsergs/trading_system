@@ -319,6 +319,8 @@ class LiqMap:
                 side_heat[idx] -= delta
                 removed, carry = _neumaier_add(removed, carry, delta)
                 if side_heat[idx] <= 1e-15:
+                    # как в decay: остаток-пыль зачисляется в removed точно
+                    removed, carry = _neumaier_add(removed, carry, side_heat[idx])
                     del side_heat[idx]
         self.removed, self._removed_carry = _neumaier_add(self.removed, self._removed_carry, removed)
         self.removed, self._removed_carry = _neumaier_add(self.removed, self._removed_carry, carry)
@@ -403,6 +405,9 @@ class LiqMap:
                 side_heat[idx] -= delta
                 lost, carry = _neumaier_add(lost, carry, delta)
                 if side_heat[idx] <= 1e-15:
+                    # пыль уходит в decayed, а не испаряется молча: без этого
+                    # инвариант массы подтекает по <=1e-15 на каждое удаление
+                    lost, carry = _neumaier_add(lost, carry, side_heat[idx])
                     del side_heat[idx]
         self.decayed, self._decayed_carry = _neumaier_add(self.decayed, self._decayed_carry, lost)
         self.decayed, self._decayed_carry = _neumaier_add(self.decayed, self._decayed_carry, carry)
