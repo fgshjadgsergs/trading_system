@@ -102,6 +102,7 @@ class LiqMap:
         typical_account_usd: float | None = None,
         blur_sigma0_bps: float | None = None,
         blur_sigma1: float = 0.0,
+        fractional_edge_consume: bool = False,
     ) -> None:
         """`typical_account_usd` (M1, opt-in): with a 4-argument (bracket)
         liq_price_fn, the maintenance tier is picked for a REPRESENTATIVE
@@ -152,6 +153,7 @@ class LiqMap:
         self.typical_account_usd = typical_account_usd
         self.blur_sigma0_bps = blur_sigma0_bps
         self.blur_sigma1 = blur_sigma1
+        self.fractional_edge_consume = fractional_edge_consume
         self.heat: dict[Side, dict[int, float]] = {Side.BUY: {}, Side.SELL: {}}
         # public accumulators stay plain readable/writable floats; each has a
         # private Neumaier carry (N3) so the mass identity holds to ~1 ulp of
@@ -321,15 +323,47 @@ class LiqMap:
         self.removed, self._removed_carry = _neumaier_add(self.removed, self._removed_carry, removed)
         self.removed, self._removed_carry = _neumaier_add(self.removed, self._removed_carry, carry)
 
+    def _consume_amount(self, idx: int, path_lo: float, path_hi: float, h: float) -> float:
+        """How much of bucket idx's heat the path takes.
+
+        Full-bucket mode: everything. Fractional-edge mode: interior buckets
+        fully, edge buckets pro rata to interval overlap (heat assumed uniform
+        within a bucket) — a bar that clipped a bucket's corner should not
+        wipe pools the price never reached.
+        """
+        if not self.fractional_edge_consume:
+            return h
+        lo, hi = self.buckets.lo(idx), self.buckets.hi(idx)
+        if path_lo <= lo and hi <= path_hi:
+            return h
+        width = hi - lo
+        if width <= 0.0:
+            return h
+        overlap = min(hi, path_hi) - max(lo, path_lo)
+        frac = min(max(overlap / width, 0.0), 1.0)
+        return h * frac
+
     def consume(self, path_lo: float, path_hi: float) -> float:
         """Zero heat in every bucket the price path [lo, hi] touched.
 
         A long pool at price p triggers once price trades down to p, a short
-        pool once price trades up to p — both mean p in [lo, hi].
+        pool once price trades up to p — both mean p in [lo, hi]. With
+        fractional_edge_consume, partially traversed edge buckets lose only
+        the traversed share of their heat.
         """
         if not path_lo <= path_hi:  # `not <=` also rejects NaN bounds (broken bar)
             raise ValueError("path_lo > path_hi (or NaN path bound)")
         taken, carry = 0.0, 0.0
+
+        def take(side_heat: dict[int, float], idx: int) -> tuple[float, float]:
+            part = self._consume_amount(idx, path_lo, path_hi, side_heat[idx])
+            rest = side_heat[idx] - part
+            if rest <= 0.0:
+                side_heat.pop(idx)
+            else:
+                side_heat[idx] = rest
+            return _neumaier_add(taken, carry, part)
+
         # N2: candidate index range of the path, extended ±1 to cover index()'s
         # ulp correction at exact bucket edges; no bucket outside it can pass
         # the overlap predicates (bucket grid is monotone in the index)
@@ -346,13 +380,13 @@ class LiqMap:
                         and self.buckets.hi(idx) > path_lo
                         and self.buckets.lo(idx) <= path_hi
                     ):
-                        taken, carry = _neumaier_add(taken, carry, side_heat.pop(idx))
+                        taken, carry = take(side_heat, idx)
             else:
                 for idx in list(side_heat):
                     # buckets are half-open [lo, hi): a bucket ending exactly at
                     # path_lo was never traversed, so the overlap test is strict
                     if self.buckets.hi(idx) > path_lo and self.buckets.lo(idx) <= path_hi:
-                        taken, carry = _neumaier_add(taken, carry, side_heat.pop(idx))
+                        taken, carry = take(side_heat, idx)
         self.consumed, self._consumed_carry = _neumaier_add(self.consumed, self._consumed_carry, taken)
         self.consumed, self._consumed_carry = _neumaier_add(self.consumed, self._consumed_carry, carry)
         return taken

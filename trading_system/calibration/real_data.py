@@ -219,6 +219,7 @@ def make_real_heat_builder(
     blur_sigma1: float = 0.0,
     entry: str = "close",
     split_sides: bool = False,
+    fractional_edge_consume: bool = False,
 ) -> HeatBuilder:
     """build(w) -> (n_bars, n_buckets) heat matrices under mixture w.
 
@@ -315,6 +316,21 @@ def make_real_heat_builder(
     for t in range(n):
         cross_lo[t] = max(int(np.searchsorted(edges, arr.low[t], side="right") - 1), 0)
         cross_hi[t] = min(int(np.searchsorted(edges, arr.high[t], side="right") - 1), nb - 1)
+    if fractional_edge_consume:
+        # traversed share of the two edge buckets (mirrors LiqMap._consume_amount;
+        # heat assumed uniform within a bucket)
+        w_lo = edges[cross_lo + 1] - edges[cross_lo]
+        w_hi = edges[cross_hi + 1] - edges[cross_hi]
+        frac_lo = np.clip(
+            (np.minimum(arr.high, edges[cross_lo + 1]) - arr.low) / np.maximum(w_lo, 1e-300),
+            0.0,
+            1.0,
+        )
+        frac_hi = np.clip(
+            (arr.high - np.maximum(arr.low, edges[cross_hi])) / np.maximum(w_hi, 1e-300),
+            0.0,
+            1.0,
+        )
 
     def build(w: np.ndarray) -> np.ndarray:
         w = np.asarray(w, dtype=float)
@@ -327,10 +343,29 @@ def make_real_heat_builder(
         for t in range(n):
             # bar order mirrors LiqMap.step: consume path -> allocate -> decay
             if cross_hi[t] >= cross_lo[t]:
-                if split_sides:
-                    rows[:, cross_lo[t] : cross_hi[t] + 1] = 0.0
+                a, b = cross_lo[t], cross_hi[t]
+                if not fractional_edge_consume:
+                    if split_sides:
+                        rows[:, a : b + 1] = 0.0
+                    else:
+                        rows[a : b + 1] = 0.0
+                elif a == b:
+                    # single-bucket path: both edge formulas reduce to (high-low)/w
+                    if split_sides:
+                        rows[:, a] *= 1.0 - frac_lo[t]
+                    else:
+                        rows[a] *= 1.0 - frac_lo[t]
                 else:
-                    rows[cross_lo[t] : cross_hi[t] + 1] = 0.0
+                    if split_sides:
+                        rows[:, a] *= 1.0 - frac_lo[t]
+                        rows[:, b] *= 1.0 - frac_hi[t]
+                        if b > a + 1:
+                            rows[:, a + 1 : b] = 0.0
+                    else:
+                        rows[a] *= 1.0 - frac_lo[t]
+                        rows[b] *= 1.0 - frac_hi[t]
+                        if b > a + 1:
+                            rows[a + 1 : b] = 0.0
             usd = arr.d_oi_usd[t]
             if usd > 0.0:
                 shares = (arr.long_share[t], 1.0 - arr.long_share[t])

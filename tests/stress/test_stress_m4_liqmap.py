@@ -647,10 +647,13 @@ def test_real_builder_survives_degenerate_bars():
         bucket_grid(bars_to_arrays(all_nan))
 
 
-@pytest.mark.parametrize("blur_sigma0", [None, 5.0])
-def test_real_builder_adversarial_volatility_matches_liqmap(blur_sigma0):
+@pytest.mark.parametrize(
+    "blur_sigma0,fractional",
+    [(None, False), (5.0, False), (None, True)],
+)
+def test_real_builder_adversarial_volatility_matches_liqmap(blur_sigma0, fractional):
     """Экстремальная волатильность: медианная отн. ошибка тоталов < 5%
-    (и без размытия, и с активным R1-ядром sigma0=5 bps)."""
+    (без размытия, с R1-ядром sigma0=5 bps и с частичным съеданием краёв)."""
     n = _n(800)
     bars = _adversarial_bars(n, seed=SEED)
     arr = bars_to_arrays(bars)
@@ -658,7 +661,12 @@ def test_real_builder_adversarial_volatility_matches_liqmap(blur_sigma0):
     grid = np.array([10.0, 25.0])
     w = np.array([0.6, 0.4])
     heat = make_real_heat_builder(
-        arr, grid, edges, bar_s=60.0, blur_sigma0_bps=blur_sigma0
+        arr,
+        grid,
+        edges,
+        bar_s=60.0,
+        blur_sigma0_bps=blur_sigma0,
+        fractional_edge_consume=fractional,
     )(w)
     lm = LiqMap(
         leverage_grid=list(grid),
@@ -666,6 +674,7 @@ def test_real_builder_adversarial_volatility_matches_liqmap(blur_sigma0):
         weight_fn=StaticWeights(w),
         decay_half_life_s=86_400.0,
         blur_sigma0_bps=blur_sigma0,
+        fractional_edge_consume=fractional,
     )
     hist = HeatHistory(lm)
     for row in bars.iter_rows(named=True):
