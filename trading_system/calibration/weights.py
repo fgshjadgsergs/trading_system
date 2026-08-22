@@ -25,6 +25,7 @@ import polars as pl
 import structlog
 
 from trading_system.calibration.event_studies import price_bucket, top_decile_mask
+from trading_system.core.schema import Side
 
 log = structlog.get_logger(__name__)
 
@@ -45,15 +46,33 @@ NS_PER_DAY = 86_400 * 1_000_000_000
 
 
 def _liq_arrays(
-    liquidations: pl.DataFrame, ts_range: tuple[int, int] | None
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    liquidations: pl.DataFrame,
+    ts_range: tuple[int, int] | None,
+    with_side: bool = False,
+) -> tuple[np.ndarray, ...]:
     ts = liquidations["ts_event"].to_numpy()
     price = liquidations["price"].to_numpy()
     usd = liquidations["qty_usd"].to_numpy()
+    side = liquidations["side"].to_numpy() if with_side else None
     if ts_range is not None:
         sel = (ts >= ts_range[0]) & (ts < ts_range[1])
         ts, price, usd = ts[sel], price[sel], usd[sel]
+        if side is not None:
+            side = side[sel]
+    if with_side:
+        return ts, price, usd, side
     return ts, price, usd
+
+
+def _dilate_mask(mask: np.ndarray, tolerance_buckets: int) -> np.ndarray:
+    """Binary dilation of the hot-cell mask by ±tolerance_buckets (R3)."""
+    if tolerance_buckets <= 0:
+        return mask
+    out = mask.copy()
+    for s in range(1, tolerance_buckets + 1):
+        out[:-s] |= mask[s:]
+        out[s:] |= mask[:-s]
+    return out
 
 
 def capture_details(
@@ -64,7 +83,8 @@ def capture_details(
     top_decile: float = 0.1,
     ts_range: tuple[int, int] | None = None,
     lag_ns: int = 0,
-) -> tuple[float, float]:
+    tolerance_buckets: int = 0,
+) -> tuple[float, float] | tuple[float, float, dict[str, tuple[float, float]]]:
     """(captured_usd, total_usd) against the as-of snapshot per event.
 
     Each liquidation is matched to the latest snapshot with
@@ -72,24 +92,64 @@ def capture_details(
     scores the map as a forecast made `lag_ns` before the event). Events
     with no prior snapshot are excluded (the map did not exist yet); events
     outside the bucket range count as not captured.
+
+    `tolerance_buckets` (R3): a print counts as captured when its cell is
+    within ±m buckets of a top-decile cell (dilation of the hot mask;
+    symmetric for every hot candidate by construction). Default 0 = exact.
+
+    Side-aware mode (M3 fix): pass side-split heat of shape (n, 2, nb) —
+    side axis 0 = long heat (below price; long liquidation prints carry
+    order side SELL), 1 = short heat, as built by make_real_heat_builder
+    with split_sides=True. Each print is then scored ONLY against the heat
+    half-matrix of its own side (long prints were captured by short heat in
+    the glued mode — the judge's bug). Returns (captured_usd, total_usd,
+    per_side) with per_side = {"long"|"short": (captured_usd, total_usd)};
+    the headline capture stays the USD-weighted sum over sides. The glued
+    2-d branch is unchanged.
     """
+    heat = np.asarray(heat)
+    split = heat.ndim == 3
     heat_ts = np.asarray(heat_ts)
-    ts, price, usd = _liq_arrays(liquidations, ts_range)
+    side = None
+    if split:
+        if "side" not in liquidations.columns:
+            raise ValueError("side-split heat needs a 'side' column in liquidations")
+        ts, price, usd, side = _liq_arrays(liquidations, ts_range, with_side=True)
+    else:
+        ts, price, usd = _liq_arrays(liquidations, ts_range)
     snap = np.searchsorted(heat_ts, ts - lag_ns, side="right") - 1
     alive = snap >= 0
     price, usd, snap = price[alive], usd[alive], snap[alive]
+    if side is not None:
+        side = side[alive]
     buckets = price_bucket(price, bucket_edges)
     captured = 0.0
-    masks: dict[int, np.ndarray] = {}
+    cap_side = [0.0, 0.0]
+    tot_side = [0.0, 0.0]
+    masks: dict[tuple[int, int], np.ndarray] = {}
     for i in range(len(price)):
+        si = 0
+        if side is not None:
+            # print side SELL == a liquidated long -> long half 0; BUY -> 1
+            si = 0 if side[i] == Side.SELL else 1
+            tot_side[si] += usd[i]
         b = buckets[i]
         if b < 0:
             continue
         r = int(snap[i])
-        if r not in masks:
-            masks[r] = top_decile_mask(heat[r], top_decile)
-        if masks[r][b]:
+        key = (r, si)
+        if key not in masks:
+            row = heat[r, si] if split else heat[r]
+            masks[key] = _dilate_mask(top_decile_mask(row, top_decile), tolerance_buckets)
+        if masks[key][b]:
             captured += usd[i]
+            cap_side[si] += usd[i]
+    if split:
+        per_side = {
+            "long": (float(cap_side[0]), float(tot_side[0])),
+            "short": (float(cap_side[1]), float(tot_side[1])),
+        }
+        return float(captured), float(usd.sum()), per_side
     return float(captured), float(usd.sum())
 
 
@@ -101,11 +161,18 @@ def capture_rate(
     top_decile: float = 0.1,
     ts_range: tuple[int, int] | None = None,
     lag_ns: int = 0,
+    tolerance_buckets: int = 0,
 ) -> float:
-    """Share of real liquidation USD landing in top-decile heat cells."""
-    captured, total = capture_details(
-        heat, heat_ts, bucket_edges, liquidations, top_decile, ts_range, lag_ns
+    """Share of real liquidation USD landing in top-decile heat cells.
+
+    Accepts glued (n, nb) heat or side-split (n, 2, nb) heat — see
+    capture_details for the side-aware and tolerance semantics.
+    """
+    details = capture_details(
+        heat, heat_ts, bucket_edges, liquidations, top_decile, ts_range, lag_ns,
+        tolerance_buckets,
     )
+    captured, total = details[0], details[1]
     return captured / total if total > 0 else 0.0
 
 

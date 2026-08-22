@@ -10,6 +10,7 @@ path a live recording or a normalized Vision archive would take.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -122,11 +123,21 @@ def stage_map(
     symbol: str,
     ratios: pl.DataFrame | None = None,
     brackets_path: str | None = None,
+    entry_price: str = "close",
 ) -> tuple[LiqMap, HeatHistory]:
+    """`entry_price` (M4): "close" (default, бит-в-бит старое поведение) or
+    "vwap" — allocate each bar's ΔOI at the bar VWAP (vwap_bar column, or
+    quote_volume/volume when present; an honest error otherwise). Bars with
+    zero volume fall back to close."""
+    if entry_price not in ("close", "vwap"):
+        raise ValueError(f"entry_price must be 'close' or 'vwap', got {entry_price!r}")
     lm_cfg = cfg["liqmap"]
     atr = float(bars["atr"].drop_nulls().median())
     grid = [float(x) for x in lm_cfg["leverage_grid"]]
-    weights = np.array([1, 2, 4, 6, 5, 4, 2, 2, 1], dtype=float)[: len(grid)]
+    # seed hump over [3, 5, 10, 20, 25, 30, 40, 50, 60, 75, 100, 125]:
+    # peak at 20x, monotone tails (R4 added the 30/40/60 rungs)
+    weights = np.array([1, 2, 4, 6, 5, 5, 4, 4, 3, 2, 2, 1], dtype=float)[: len(grid)]
+    weights = weights / weights.sum()
     liq_fn = None
     if brackets_path:  # track B1: real per-symbol margin tiers instead of flat MMR
         liq_fn = bracket_liq_price_fn(load_brackets(brackets_path), symbol)
@@ -140,15 +151,31 @@ def stage_map(
     )
     if ratios is not None and ratios.height:  # track B2: causal per-bar side shares
         bars = join_long_share(bars, ratios)
+    if entry_price == "vwap":
+        if "vwap_bar" in bars.columns:
+            bars = bars.with_columns(pl.col("vwap_bar").alias("_entry"))
+        elif "quote_volume" in bars.columns and "volume" in bars.columns:
+            bars = bars.with_columns(
+                (pl.col("quote_volume") / pl.col("volume")).alias("_entry")
+            )
+        else:
+            raise ValueError(
+                "entry_price='vwap' requires a vwap_bar column or quote_volume+volume"
+            )
     hist = HeatHistory(lm)
     for row in bars.iter_rows(named=True):
         d_oi = row["d_oi_usd"]
         if d_oi is None:
             d_oi = row["quote_volume"] * 0.05
+        entry = row["close"]
+        if entry_price == "vwap":
+            vw = row["_entry"]
+            if vw is not None and math.isfinite(vw) and vw > 0:
+                entry = vw  # zero-volume bars keep the close entry
         lm.step(
             bar_low=row["low"],
             bar_high=row["high"],
-            bar_close=row["close"],
+            bar_close=entry,
             d_oi_usd=d_oi,
             dt_s=(row["ts_close"] - row["ts_open"]) / 1e9,
             long_share=row.get("long_share"),
@@ -386,6 +413,10 @@ def main() -> None:
     parser.add_argument("--n-trades", type=int, default=150_000)
     parser.add_argument("--timeframe", default="5m")
     parser.add_argument("--brackets", default=None, help="json with per-symbol leverage brackets")
+    parser.add_argument(
+        "--entry-price", default="close", choices=("close", "vwap"),
+        help="M4: цена входа для раскладки ΔOI (vwap = bar VWAP; default close)",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -406,7 +437,10 @@ def main() -> None:
     figures += stage_book(lake, args.symbol, out)
     trades, bars = stage_features(lake, args.symbol, args.timeframe)
     ratios = read_stream(lake, "ratio", symbol=args.symbol)
-    lm, hist = stage_map(bars, cfg, args.symbol, ratios=ratios, brackets_path=args.brackets)
+    lm, hist = stage_map(
+        bars, cfg, args.symbol, ratios=ratios, brackets_path=args.brackets,
+        entry_price=args.entry_price,
+    )
     walls = stage_walls(lake, args.symbol)
     events = stage_signals(bars, hist, cfg, walls=walls, wall_band=lm.buckets.bucket_size)
     span = float(bars["high"].max() - bars["low"].min())

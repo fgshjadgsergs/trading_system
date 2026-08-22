@@ -238,6 +238,147 @@ def test_mass_invariant_over_arbitrary_op_sequences(ops):
     assert lm.mass_balance_error() / scale < 1e-9
 
 
+def test_dropped_counter_accounts_for_never_liquidating_slices():
+    """M5: contributed + dropped == Σ положительных ΔOI (доли и веса в сумме 1)."""
+    lm = LiqMap(
+        leverage_grid=[1, 10, 25],  # 1x лонг никогда не ликвидируется (lp=0)
+        buckets=PriceBuckets(10.0),
+        weight_fn=StaticWeights(np.array([1.0, 2.0, 1.0])),
+        long_share=0.6,
+    )
+    rng = np.random.default_rng(3)
+    d_ois = rng.uniform(1.0, 1e6, 50)
+    price = 50_000.0
+    for d in d_ois:  # только allocate: без consume/decay/remove
+        price *= float(np.exp(rng.normal(0, 0.001)))
+        lm.allocate(float(d), price)
+    total_in = float(d_ois.sum())
+    assert lm.dropped > 0.0  # 1x-лонг-слайсы действительно отброшены
+    assert abs((lm.contributed + lm.dropped) - total_in) / total_in < 1e-12
+    assert lm.mass_balance_error() / total_in < 1e-12
+    # dropped не входит в баланс массы: ΣH == contributed
+    assert abs(lm.total_heat() - lm.contributed) / total_in < 1e-12
+
+
+def make_bracket_map(typical_account_usd: float | None) -> LiqMap:
+    from trading_system.collectors.brackets import bracket_liq_price_fn
+
+    return LiqMap(
+        leverage_grid=[5, 10, 25, 50, 100],
+        buckets=PriceBuckets(bucket_size=10.0),
+        weight_fn=StaticWeights(np.array([1.0, 2.0, 3.0, 2.0, 1.0])),
+        liq_price_fn=bracket_liq_price_fn({"BTCUSDT": DEFAULT_BRACKETS}, "BTCUSDT"),
+        long_share=0.5,
+        decay_half_life_s=3_600.0,
+        typical_account_usd=typical_account_usd,
+    )
+
+
+def test_typical_account_validation():
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            make_bracket_map(bad)
+
+
+def test_typical_account_tier1_lp_is_qty_independent():
+    """M1: пока нотионал счёта в тире 1 (cum=0), lp не зависит от typical —
+    карты для typical=10k и typical=40k совпадают бит-в-бит."""
+    maps = [make_bracket_map(10_000.0), make_bracket_map(40_000.0)]
+    rng_states = [np.random.default_rng(7), np.random.default_rng(7)]
+    for lm, rng in zip(maps, rng_states, strict=True):
+        price = 50_000.0
+        for _ in range(50):
+            price *= float(np.exp(rng.normal(0, 0.002)))
+            lm.step(price * 0.999, price * 1.001, price, float(rng.uniform(0.0, 5e5)), dt_s=60.0)
+    assert maps[0].heat == maps[1].heat  # dict-и с float-ами: точное равенство
+    assert maps[0].contributed == maps[1].contributed
+
+
+def make_blur_map(sigma0: float = 5.0, sigma1: float = 0.0) -> LiqMap:
+    return LiqMap(
+        leverage_grid=[5, 10, 25, 50, 100],
+        buckets=PriceBuckets(bucket_size=10.0),
+        weight_fn=StaticWeights(np.array([1.0, 2.0, 3.0, 2.0, 1.0])),
+        long_share=0.5,
+        decay_half_life_s=3_600.0,
+        blur_sigma0_bps=sigma0,
+        blur_sigma1=sigma1,
+    )
+
+
+def test_blur_param_validation():
+    for bad in (-1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            make_blur_map(sigma0=bad)
+        with pytest.raises(ValueError):
+            make_blur_map(sigma1=bad)
+
+
+def test_blur_conserves_mass_exactly():
+    """R1: раздача amount по ядру консервативна — contributed набирает ровно
+    amount, инвариант массы держится на 1e-12."""
+    lm = make_blur_map()
+    lm.allocate(1_000_000.0, 50_000.0)
+    assert lm.mass_balance_error() / 1e6 < 1e-12
+    assert abs(lm.total_heat() - 1_000_000.0) / 1e6 < 1e-12
+    # и под смесью операций
+    rng = np.random.default_rng(5)
+    price = 50_000.0
+    for _ in range(500):
+        price *= float(np.exp(rng.normal(0, 0.002)))
+        lm.step(price * 0.999, price * 1.001, price, float(rng.uniform(-2e5, 6e5)), dt_s=60.0)
+    scale = max(1.0, lm.contributed)
+    assert lm.mass_balance_error() / scale < 1e-12
+
+
+def test_blur_side_trim_no_heat_past_price():
+    """R1: гауссов хвост за текущей ценой обрезан — лонг-тепла на/выше цены
+    раскладки нет, шорт-тепла на/ниже нет (и при дистанционном sigma1)."""
+    for sigma0, sigma1 in ((5.0, 0.0), (20.0, 0.5), (0.0, 1.0)):
+        lm = make_blur_map(sigma0=sigma0, sigma1=sigma1)
+        price = 50_000.0
+        lm.allocate(2_000_000.0, price)
+        snap = lm.snapshot()
+        longs = snap["prices"][snap["long"] > 0]
+        shorts = snap["prices"][snap["short"] > 0]
+        assert longs.size and shorts.size
+        assert longs.max() < price  # центры лонг-клеток строго ниже цены
+        assert shorts.min() > price
+        assert lm.mass_balance_error() / 2e6 < 1e-12
+
+
+def test_regression_hash_blur_config():
+    """R1 pin: бит-стабильность активированной конфигурации sigma0=5.0 bps."""
+    lm = make_blur_map()
+    rng = np.random.default_rng(42)
+    price = 50_000.0
+    for _ in range(200):
+        price *= float(np.exp(rng.normal(0, 0.002)))
+        lo, hi = price * 0.999, price * 1.001
+        lm.step(lo, hi, price, d_oi_usd=float(rng.uniform(-2e5, 6e5)), dt_s=60.0)
+    snap = lm.snapshot()
+    payload = np.round(
+        np.concatenate([snap["prices"], snap["long"], snap["short"]]), 6
+    ).tobytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    assert digest == "f60c4d1721ba13a13880b40017435569269f375951f46c14f04cfa8a95103a17"
+
+
+def test_neumaier_accumulators_survive_many_small_ops():
+    """N3: инвариант массы держится на 1e-12 после многих мелких операций."""
+    lm = make_map()
+    rng = np.random.default_rng(11)
+    price = 50_000.0
+    for _ in range(3_000):
+        price *= float(np.exp(rng.normal(0, 0.002)))
+        lm.allocate(float(rng.uniform(0.0, 1e6)), price)
+        lm.consume(price * 0.999, price * 1.001)
+        lm.decay(60.0)
+        lm.allocate(-float(rng.uniform(0.0, 1e5)), price)
+    scale = max(1.0, lm.contributed)
+    assert lm.mass_balance_error() / scale < 1e-12
+
+
 # -- regression hash ----------------------------------------------------------
 
 
@@ -256,6 +397,23 @@ def test_regression_hash_of_heat_matrix():
     ).tobytes()
     digest = hashlib.sha256(payload).hexdigest()
     assert digest == "d3da19d2e9de12334f1e3512fd66de4d7a24d1c262cf56dac9027169dc8596ea"
+
+
+def test_regression_hash_typical_account_bracket_config():
+    """M1 pin: бит-стабильность активированной конфигурации typical=20k + брекеты."""
+    lm = make_bracket_map(20_000.0)
+    rng = np.random.default_rng(42)
+    price = 50_000.0
+    for _ in range(200):
+        price *= float(np.exp(rng.normal(0, 0.002)))
+        lo, hi = price * 0.999, price * 1.001
+        lm.step(lo, hi, price, d_oi_usd=float(rng.uniform(-2e5, 6e5)), dt_s=60.0)
+    snap = lm.snapshot()
+    payload = np.round(
+        np.concatenate([snap["prices"], snap["long"], snap["short"]]), 6
+    ).tobytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    assert digest == "404a8d3db288741bad51bdb8111dcb29c614b02c59d61948d1f3d299a218a19b"
 
 
 def test_demo_reports(tmp_path):

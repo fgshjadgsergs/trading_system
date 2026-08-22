@@ -9,6 +9,12 @@ scores naive vs static (optionally rolling) STRICTLY out-of-sample with an
 embargo gap, runs the reversal and magnet event studies on the test window,
 and writes reports/stage3-<symbol>/README.md with an explicit verdict.
 
+The Gate A verdict (headline) is the capture rate at a lag of --lag-bars bars
+(default 1: the map is scored as a forecast made one bar before each print,
+so hugging the current price does not pay) and, when the prints carry sides,
+side-aware: a print counts only if the heat half-matrix of ITS side is hot in
+its cell. lag=0 capture is reported alongside as reference.
+
 Ground truth = real liquidation prints. Vision does NOT publish them (the
 S3 listing has no liquidationSnapshot dataset), so the truth comes from a
 live forceOrder recording: run scripts/record_live.py, then point --lake at
@@ -38,12 +44,13 @@ from trading_system.calibration.event_studies import (
 )
 from trading_system.calibration.real_data import (
     bars_to_arrays,
-    bucket_grid,
+    exact_bucket_grid,
     make_real_heat_builder,
 )
 from trading_system.calibration.weights import (
     RollingCalibrator,
     StaticWeightCalibrator,
+    capture_details,
     capture_rate,
     naive_baseline_heat,
 )
@@ -79,23 +86,43 @@ def analyze(
     rolling: bool = False,
     n_candidates: int = 32,
     seed: int = 42,
+    lag_bars: int = 1,
 ) -> dict:
-    """Core Gate A/B analysis over prepared bars + real liquidation prints."""
+    """Core Gate A/B analysis over prepared bars + real liquidation prints.
+
+    The HEADLINE Gate A metric is the capture rate at a lag of `lag_bars`
+    bars (the map must predict, not hug the price) and — when the prints
+    carry sides — side-aware: each print is scored only against the heat
+    half-matrix of its own side. lag=0 capture is reported as reference.
+    """
     lm_cfg = cfg["liqmap"]
     grid = np.array([float(x) for x in lm_cfg["leverage_grid"]])
     arr = bars_to_arrays(bars)
-    edges = bucket_grid(arr, float(lm_cfg["bucket_atr_fraction"]))
     liq_fn = None
     if brackets_path:
         liq_fn = bracket_liq_price_fn(load_brackets(brackets_path), symbol)
-    build = make_real_heat_builder(
+    # N5: span from the actually computed liquidation prices, no edge clamp
+    edges = exact_bucket_grid(
         arr,
         grid,
-        edges,
-        bar_s=TIMEFRAME_NS[timeframe] / NS_PER_S,
+        float(lm_cfg["bucket_atr_fraction"]),
+        mmr=float(lm_cfg["maint_margin_rate_flat"]),
+        liq_fn=liq_fn,
+    )
+    bar_ns = int(TIMEFRAME_NS[timeframe])
+    lag_ns = int(lag_bars) * bar_ns
+    builder_kwargs = dict(
+        bar_s=bar_ns / NS_PER_S,
         decay_half_life_s=float(lm_cfg["decay_half_life_s"]),
         mmr=float(lm_cfg["maint_margin_rate_flat"]),
         liq_fn=liq_fn,
+    )
+    build = make_real_heat_builder(arr, grid, edges, **builder_kwargs)
+    use_sides = "side" in liqs.columns
+    build_split = (
+        make_real_heat_builder(arr, grid, edges, split_sides=True, **builder_kwargs)
+        if use_sides
+        else None
     )
 
     t0, t1 = int(arr.ts[0]), int(arr.ts[-1])
@@ -122,25 +149,42 @@ def analyze(
     )
 
     capture: dict[str, float | None] = {}
+    capture_lag0: dict[str, float] = {}
+    capture_by_side: dict[str, float | None] = {}
     weights = None
     if n_liq_train == 0 or n_liq_test == 0:
         log.warning("no_liquidation_truth", train=n_liq_train, test=n_liq_test)
     else:
         naive = naive_baseline_heat(arr.close, edges)
-        capture["naive"] = capture_rate(naive, arr.ts, edges, liqs, top_decile, test_range)
+        # naive is side-agnostic (same levels both sides): its side-aware
+        # capture equals the glued one, so the 2-d score is the fair baseline
+        capture["naive"] = capture_rate(naive, arr.ts, edges, liqs, top_decile, test_range, lag_ns)
+        capture_lag0["naive"] = capture_rate(naive, arr.ts, edges, liqs, top_decile, test_range, 0)
         cal = StaticWeightCalibrator(
-            n_weights=len(grid), seed=seed, n_candidates=n_candidates, top_decile=top_decile
+            n_weights=len(grid), seed=seed, n_candidates=n_candidates,
+            top_decile=top_decile, lag_ns=lag_ns,
         )
-        log.info("calibrating_static", candidates=n_candidates)
+        log.info("calibrating_static", candidates=n_candidates, lag_bars=lag_bars)
         fit = cal.fit(build, arr.ts, edges, liqs, arr.close, ts_range=train_range)
         weights = fit.weights
+        static_heat = build_split(weights) if build_split is not None else build(weights)
         capture["static"] = capture_rate(
-            build(weights), arr.ts, edges, liqs, top_decile, test_range
+            static_heat, arr.ts, edges, liqs, top_decile, test_range, lag_ns
         )
+        capture_lag0["static"] = capture_rate(
+            static_heat, arr.ts, edges, liqs, top_decile, test_range, 0
+        )
+        if build_split is not None:
+            details = capture_details(
+                static_heat, arr.ts, edges, liqs, top_decile, test_range, lag_ns
+            )
+            capture_by_side = {
+                s: (c / t if t > 0 else None) for s, (c, t) in details[2].items()
+            }
         if rolling:
             roll = RollingCalibrator(cal, train_window_ns=21 * NS_PER_DAY)
             capture["rolling"], _ = roll.oos_capture(
-                build, arr.ts, edges, liqs, arr.close, test_range, top_decile, 0
+                build, arr.ts, edges, liqs, arr.close, test_range, top_decile, lag_ns
             )
         log.info("capture", **{key: round(v, 4) for key, v in capture.items() if v is not None})
 
@@ -202,7 +246,11 @@ def analyze(
     )
     gate_b_sig = rev is not None and rev.stats.p_value < 0.05 and rev.stats.effect > 0
     return {
-        "capture": capture,
+        "capture": capture,  # HEADLINE: lag = lag_bars, side-aware when sides present
+        "capture_lag0": capture_lag0,  # reference only
+        "capture_by_side": capture_by_side,
+        "lag_bars": int(lag_bars),
+        "side_aware": build_split is not None,
         "weights": weights.tolist() if weights is not None else None,
         "gate_a": gate_a if capture else None,
         "reversal_effect": rev.stats.effect if rev else None,
@@ -228,6 +276,10 @@ def main(argv: list[str] | None = None, fetch=None) -> None:
     parser.add_argument("--test-frac", type=float, default=0.25)
     parser.add_argument("--embargo-days", type=float, default=2.0)
     parser.add_argument("--candidates", type=int, default=32, help="кандидатов в калибраторе")
+    parser.add_argument(
+        "--lag-bars", type=int, default=1,
+        help="лаг (в барах) headline-метрики Gate A; 0 = скоринг по текущему снапшоту",
+    )
     parser.add_argument("--skip-download", action="store_true")
     args = parser.parse_args(argv)
 
@@ -287,6 +339,7 @@ def main(argv: list[str] | None = None, fetch=None) -> None:
         rolling=args.rolling,
         n_candidates=args.candidates,
         seed=seed,
+        lag_bars=args.lag_bars,
     )
 
     cap = res["capture"]
@@ -305,18 +358,32 @@ def main(argv: list[str] | None = None, fetch=None) -> None:
     else:
         naive_s = f"{cap['naive']:.4f}"
         static_s = f"{cap['static']:.4f}"
+        metric_s = (
+            f"headline-метрика: OOS capture с lag={res['lag_bars']} бар"
+            + (", side-aware по сторонам принтов" if res["side_aware"] else "")
+        )
         if res["gate_a"]:
             verdict = (
                 f"**Gate A: ПРОЙДЕН — карта бьёт наивный бейзлайн OOS: "
-                f"static {static_s} > naive {naive_s}.**"
+                f"static {static_s} > naive {naive_s}** ({metric_s})."
             )
         else:
             verdict = (
-                f"**Gate A: НЕ пройден — static {static_s} vs naive {naive_s} OOS.** "
+                f"**Gate A: НЕ пройден — static {static_s} vs naive {naive_s} OOS** "
+                f"({metric_s}). "
                 "По чеклисту это стоп и возврат к модели карты, не повод подгонять параметры."
             )
         if cap.get("rolling") is not None:
             verdict += f" Rolling: {cap['rolling']:.4f}."
+        cap0 = res["capture_lag0"]
+        verdict += (
+            f" Справочно lag=0: static {cap0['static']:.4f} vs naive {cap0['naive']:.4f}."
+        )
+        by_side = {s: v for s, v in res["capture_by_side"].items() if v is not None}
+        if by_side:
+            verdict += " По сторонам (static, lag): " + ", ".join(
+                f"{s} {v:.4f}" for s, v in sorted(by_side.items())
+            ) + "."
     lines.append(verdict)
     if res["gate_b_significant"] is not None:
         lines.append("")

@@ -18,6 +18,7 @@ from trading_system.calibration.weights import (
     RollingCalibrator,
     StaticWeightCalibrator,
     calibration_curve,
+    capture_details,
     capture_rate,
     compare_ladder,
     flow_divergence,
@@ -75,19 +76,20 @@ def _calibrator(lag_bars=10):
 
 
 def _liq_frame(rows):
+    """Rows of (ts, price, usd[, side]); side defaults to -1 (SELL = лонг-принт)."""
     return pl.DataFrame(
         [
             {
                 "exchange": "binance_usdm",
                 "symbol": "BTCUSDT",
-                "ts_event": ts,
-                "ts_recv": ts,
-                "price": price,
-                "qty": usd / price,
-                "qty_usd": usd,
-                "side": -1,
+                "ts_event": r[0],
+                "ts_recv": r[0],
+                "price": r[1],
+                "qty": r[2] / r[1],
+                "qty_usd": r[2],
+                "side": r[3] if len(r) > 3 else -1,
             }
-            for ts, price, usd in rows
+            for r in rows
         ],
         schema=POLARS_SCHEMAS["liquidation"],
         orient="row",
@@ -118,6 +120,51 @@ def test_capture_rate_exact_hand_case():
     # stay on snap 0, ts=250/260 fall back to snap 1, ts=50 stays excluded
     cap3 = capture_rate(heat, heat_ts, edges, liqs, top_decile=0.1, lag_ns=50)
     assert cap3 == pytest.approx(200.0 / 300.0)
+
+
+def test_side_aware_capture_scores_prints_against_own_half():
+    """M8 (баг-фикс судьи): лонг-принт в ячейке, горячей ТОЛЬКО в
+    шорт-полуматрице, side-aware не захвачен; склеенный расчёт захватывает."""
+    edges = np.arange(0.0, 11.0)  # 10 бакетов
+    heat3 = np.zeros((1, 2, 10))
+    heat3[0, 1, 7] = 5.0  # горячо только в ШОРТ-половине (ось 1)
+    heat3[0, 0, 2] = 3.0  # лонг-тепло в бакете 2
+    heat_ts = np.array([100])
+    long_print_at_7 = _liq_frame([(150, 7.5, 100.0, -1)])
+    glued = capture_rate(heat3.sum(axis=1), heat_ts, edges, long_print_at_7)
+    assert glued > 0.0  # склеенная ветка «захватывает» чужую сторону
+    assert capture_rate(heat3, heat_ts, edges, long_print_at_7) == 0.0
+    cap, tot, per_side = capture_details(heat3, heat_ts, edges, long_print_at_7)
+    assert (cap, tot) == (0.0, 100.0)
+    assert per_side["long"] == (0.0, 100.0)
+    assert per_side["short"] == (0.0, 0.0)
+    # принты, попадающие в тепло СВОЕЙ стороны, захвачены; итог — USD-взвешенный
+    mixed = _liq_frame([(150, 2.5, 100.0, -1), (150, 7.5, 300.0, 1)])
+    cap, tot, per_side = capture_details(heat3, heat_ts, edges, mixed)
+    assert (cap, tot) == (400.0, 400.0)
+    assert per_side["long"] == (100.0, 100.0)
+    assert per_side["short"] == (300.0, 300.0)
+    assert capture_rate(heat3, heat_ts, edges, mixed) == pytest.approx(1.0)
+    # side-split тепло без колонки side — честная ошибка
+    with pytest.raises(ValueError):
+        capture_rate(heat3, heat_ts, edges, mixed.drop("side"))
+
+
+def test_capture_tolerance_dilates_hot_mask():
+    """R3: допуск m=2 — принт в 2 бакетах от горячей ячейки засчитан, в 3 — нет."""
+    edges = np.arange(0.0, 21.0)  # 20 бакетов; top-децили: 2 ячейки, positive-only
+    heat = np.zeros((1, 20))
+    heat[0, 10] = 5.0
+    heat_ts = np.array([100])
+    print_at_8 = _liq_frame([(150, 8.5, 100.0)])  # 2 бакета от горячей
+    print_at_7 = _liq_frame([(150, 7.5, 100.0)])  # 3 бакета
+    assert capture_rate(heat, heat_ts, edges, print_at_8) == 0.0
+    assert capture_rate(heat, heat_ts, edges, print_at_8, tolerance_buckets=2) == 1.0
+    assert capture_rate(heat, heat_ts, edges, print_at_7, tolerance_buckets=2) == 0.0
+    assert capture_rate(heat, heat_ts, edges, print_at_7, tolerance_buckets=3) == 1.0
+    # симметрия: принт по другую сторону от горячей ячейки
+    print_at_12 = _liq_frame([(150, 12.5, 100.0)])
+    assert capture_rate(heat, heat_ts, edges, print_at_12, tolerance_buckets=2) == 1.0
 
 
 def test_flow_divergence_prefers_true_weights(world_static, build_static):

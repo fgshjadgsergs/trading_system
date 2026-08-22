@@ -25,6 +25,7 @@ from trading_system.calibration.real_data import (
     BarArrays,
     bars_to_arrays,
     bucket_grid,
+    exact_bucket_grid,
     make_real_heat_builder,
 )
 from trading_system.collectors.brackets import load_brackets, parse_leverage_brackets
@@ -187,7 +188,8 @@ def test_mass_invariant_100k_random_ops():
     assert ops_per_s > 1_000  # деградация на порядок от ~15k ops/s — регресс
     assert all(h >= 0.0 for sh in lm.heat.values() for h in sh.values())
     scale = max(1.0, lm.contributed)
-    assert lm.mass_balance_error() / scale < 1e-9
+    # N3: Neumaier-компенсированные аккумуляторы держат инвариант на 1e-12
+    assert lm.mass_balance_error() / scale < 1e-12
     total = lm.total_heat()
     assert math.isfinite(total) and total >= 0.0
 
@@ -310,6 +312,64 @@ def test_consume_half_open_boundary_10k_random():
         # путь, реально входящий в бакет, забирает его целиком
         assert lm.consume(lm.buckets.lo(idx), boundary) == pytest.approx(100.0)
         assert lm.total_heat() == 0.0
+
+
+def test_consume_range_probe_equivalence_fuzz_10k():
+    """N2: range-probe ветвь consume эквивалентна полному скану — множество
+    снятых бакетов и оставшийся heat бит-в-бит; обе ветви принудительно
+    (маленькая занятость -> скан, огромная -> probe), включая пути, начинающиеся
+    и кончающиеся ровно на границах бакетов (ulp-коррекция index покрыта ±1)."""
+    n = _n(10_000)
+    rng = np.random.default_rng(SEED)
+    n_scan = n_probe = 0
+    for _ in range(n):
+        size = float(np.exp(rng.uniform(np.log(1e-3), np.log(100.0))))
+        b = PriceBuckets(size)
+        core_idx = sorted({int(x) for x in rng.integers(-50, 50, int(rng.integers(1, 12)))})
+        core = {
+            i: float(h)
+            for i, h in zip(core_idx, rng.uniform(1.0, 1e6, len(core_idx)), strict=True)
+        }
+        lo_i, hi_i = sorted(int(x) for x in rng.integers(-52, 52, 2))
+        # в половине случаев путь ложится ровно на границы бакетов
+        path_lo = b.lo(lo_i) if rng.random() < 0.5 else b.lo(lo_i) + size * float(rng.random())
+        path_hi = b.hi(hi_i) if rng.random() < 0.5 else b.lo(hi_i) + size * float(rng.random())
+        if path_lo > path_hi:
+            path_lo, path_hi = path_hi, path_lo
+        # оракул: те же полуоткрытые предикаты по всем занятым бакетам
+        expect = {i for i in core if b.hi(i) > path_lo and b.lo(i) <= path_hi}
+
+        lm_a = LiqMap([10.0], b, StaticWeights(np.array([1.0])))
+        lm_a.heat[Side.BUY].update(core)
+        lm_probe = LiqMap([10.0], b, StaticWeights(np.array([1.0])))
+        lm_probe.heat[Side.BUY].update(core)
+        # прокладка далеко за пределами кандидатов пути: раздувает занятость,
+        # принудительно включая probe-ветвь, но не пересекается с путём
+        pad_base = hi_i + 1_000
+        for j in range(pad_base, pad_base + 300):
+            lm_probe.heat[Side.BUY][j] = 1.0
+
+        width = (b.index(path_hi) + 1) - (b.index(path_lo) - 1) + 1
+        assert width < len(lm_probe.heat[Side.BUY])  # огромная занятость -> probe
+        n_probe += 1
+        if width >= len(core):  # маленькая занятость -> полный скан
+            n_scan += 1
+
+        taken_a = lm_a.consume(path_lo, path_hi)
+        taken_probe = lm_probe.consume(path_lo, path_hi)
+        left_a = dict(lm_a.heat[Side.BUY])
+        left_probe = {i: h for i, h in lm_probe.heat[Side.BUY].items() if i < pad_base}
+        assert set(core) - set(left_a) == expect  # множество снятых == оракул
+        assert left_a == left_probe  # heat бит-в-бит между ветвями
+        assert all(left_a[i] == core[i] for i in left_a)  # нетронутые — байт в байт
+        if expect:
+            assert taken_a == pytest.approx(taken_probe, rel=1e-12, abs=0.0)
+        else:
+            assert taken_a == taken_probe == 0.0
+        assert len(lm_probe.heat[Side.BUY]) == len(left_probe) + 300  # прокладка цела
+    # обе ветви действительно исполнялись много раз
+    assert n_probe == n
+    assert n_scan > n // 10
 
 
 def test_rebucket_conserves_mass_extreme_ratio():
@@ -587,20 +647,25 @@ def test_real_builder_survives_degenerate_bars():
         bucket_grid(bars_to_arrays(all_nan))
 
 
-def test_real_builder_adversarial_volatility_matches_liqmap():
-    """Экстремальная волатильность: медианная отн. ошибка тоталов < 5%."""
+@pytest.mark.parametrize("blur_sigma0", [None, 5.0])
+def test_real_builder_adversarial_volatility_matches_liqmap(blur_sigma0):
+    """Экстремальная волатильность: медианная отн. ошибка тоталов < 5%
+    (и без размытия, и с активным R1-ядром sigma0=5 bps)."""
     n = _n(800)
     bars = _adversarial_bars(n, seed=SEED)
     arr = bars_to_arrays(bars)
     edges = bucket_grid(arr, atr_fraction=0.5)
     grid = np.array([10.0, 25.0])
     w = np.array([0.6, 0.4])
-    heat = make_real_heat_builder(arr, grid, edges, bar_s=60.0)(w)
+    heat = make_real_heat_builder(
+        arr, grid, edges, bar_s=60.0, blur_sigma0_bps=blur_sigma0
+    )(w)
     lm = LiqMap(
         leverage_grid=list(grid),
         buckets=PriceBuckets(float(edges[1] - edges[0])),
         weight_fn=StaticWeights(w),
         decay_half_life_s=86_400.0,
+        blur_sigma0_bps=blur_sigma0,
     )
     hist = HeatHistory(lm)
     for row in bars.iter_rows(named=True):
@@ -617,6 +682,112 @@ def test_real_builder_adversarial_volatility_matches_liqmap():
     assert np.all(fast <= inflow + 1e-6)
 
 
+def test_real_builder_split_sides_shape_order_and_glue():
+    """M8: split_sides=True даёт (n, 2, nb); ось сторон: 0=лонг-тепло (пулы
+    ниже цены), 1=шорт; склейка по оси сторон совпадает с дефолтным билдером."""
+    n = _n(120)
+    bars = _adversarial_bars(n, seed=SEED)
+    arr = bars_to_arrays(bars)
+    edges = bucket_grid(arr, atr_fraction=0.5)
+    grid = np.array([10.0, 25.0])
+    w = np.array([0.6, 0.4])
+    h2 = make_real_heat_builder(arr, grid, edges, bar_s=60.0)(w)
+    h3 = make_real_heat_builder(arr, grid, edges, bar_s=60.0, split_sides=True)(w)
+    assert h3.shape == (bars.height, 2, len(edges) - 1)
+    np.testing.assert_allclose(h3.sum(axis=1), h2, rtol=1e-9, atol=1e-9)
+    # семантика сторон на одном плоском баре: лонг-пулы строго ниже цены входа
+    one = BarArrays(
+        ts=np.array([MIN_NS], dtype=np.int64),
+        close=np.array([100.0]),
+        low=np.array([100.0]),
+        high=np.array([100.0]),
+        d_oi_usd=np.array([1_000.0]),
+        long_share=np.array([0.5]),
+        atr=np.array([1.0]),
+    )
+    e1 = np.arange(0.0, 201.0, 1.0)
+    centers = (e1[:-1] + e1[1:]) / 2
+    h1 = make_real_heat_builder(one, np.array([10.0]), e1, bar_s=60.0, split_sides=True)(
+        np.array([1.0])
+    )
+    assert h1[0, 0].sum() > 0.0 and h1[0, 1].sum() > 0.0
+    assert centers[h1[0, 0] > 0].max() < 100.0  # лонг-тепло ниже цены
+    assert centers[h1[0, 1] > 0].min() > 100.0  # шорт-тепло выше цены
+
+
+def test_exact_bucket_grid_no_edge_mass_and_matches_liqmap():
+    """N5: сетка с точным span из фактических lp — краевые бакеты строго
+    пусты (нет клэмпа), сверка с точным LiqMap-реплеем цела, а запас 3σ при
+    активном ядре не режет размытие краем сетки."""
+    n = _n(300)
+    bars = _adversarial_bars(n, seed=SEED)
+    arr = bars_to_arrays(bars)
+    grid = np.array([3.0, 10.0, 25.0])  # 3x: самые глубокие пулы
+    w = np.array([0.3, 0.4, 0.3])
+    edges = exact_bucket_grid(arr, grid, atr_fraction=0.5)
+    heat = make_real_heat_builder(arr, grid, edges, bar_s=60.0)(w)
+    # масса на краевых бакетах экстремального грида == 0
+    assert heat[:, 0].sum() == 0.0
+    assert heat[:, -1].sum() == 0.0
+    lm = LiqMap(
+        leverage_grid=list(grid),
+        buckets=PriceBuckets(float(edges[1] - edges[0])),
+        weight_fn=StaticWeights(w),
+        decay_half_life_s=86_400.0,
+    )
+    hist = HeatHistory(lm)
+    for row in bars.iter_rows(named=True):
+        lm.step(row["low"], row["high"], row["close"], row["d_oi_usd"], dt_s=60.0)
+        hist.record(row["ts_close"])
+    fast = heat.sum(axis=1)
+    exact = np.array([hist.total_at(i) for i in range(len(hist))])
+    mask = exact > 0
+    assert mask.sum() > n // 2
+    rel = np.abs(fast[mask] - exact[mask]) / exact[mask]
+    assert float(np.median(rel)) < 0.05
+    # запас 3σ: тоталы на точной сетке совпадают с заведомо широкой сеткой
+    edges_b = exact_bucket_grid(arr, grid, atr_fraction=0.5, blur_sigma0_bps=5.0)
+    wide = bucket_grid(arr, atr_fraction=0.5)
+    hb = make_real_heat_builder(arr, grid, edges_b, bar_s=60.0, blur_sigma0_bps=5.0)(w)
+    hw = make_real_heat_builder(arr, grid, wide, bar_s=60.0, blur_sigma0_bps=5.0)(w)
+    np.testing.assert_allclose(hb.sum(axis=1), hw.sum(axis=1), rtol=1e-9)
+
+
+def test_real_builder_typical_account_matches_liqmap():
+    """M1: сверка карта<->зеркало при активном typical_account_usd + брекетах —
+    qty тира w-независим и бит-идентичен между точным реплеем и билдером."""
+    from trading_system.collectors.brackets import bracket_liq_price_fn
+
+    n = _n(400)
+    bars = _adversarial_bars(n, seed=SEED)
+    arr = bars_to_arrays(bars)
+    edges = bucket_grid(arr, atr_fraction=0.5)
+    grid = np.array([10.0, 25.0])
+    w = np.array([0.6, 0.4])
+    fn = bracket_liq_price_fn({"BTCUSDT": DEFAULT_BRACKETS}, "BTCUSDT")
+    heat = make_real_heat_builder(
+        arr, grid, edges, bar_s=60.0, liq_fn=fn, typical_account_usd=20_000.0
+    )(w)
+    lm = LiqMap(
+        leverage_grid=list(grid),
+        buckets=PriceBuckets(float(edges[1] - edges[0])),
+        weight_fn=StaticWeights(w),
+        liq_price_fn=fn,
+        decay_half_life_s=86_400.0,
+        typical_account_usd=20_000.0,
+    )
+    hist = HeatHistory(lm)
+    for row in bars.iter_rows(named=True):
+        lm.step(row["low"], row["high"], row["close"], row["d_oi_usd"], dt_s=60.0)
+        hist.record(row["ts_close"])
+    fast = heat.sum(axis=1)
+    exact = np.array([hist.total_at(i) for i in range(len(hist))])
+    mask = exact > 0
+    assert mask.sum() > n // 2
+    rel = np.abs(fast[mask] - exact[mask]) / exact[mask]
+    assert float(np.median(rel)) < 0.05
+
+
 def test_real_builder_drops_never_liquidating_slices():
     """Плечо 1 (лонг не ликвидируется, lp=0) не должно копить массу в нижнем
     крайнем бакете — LiqMap такие слайсы пропускает."""
@@ -630,7 +801,7 @@ def test_real_builder_drops_never_liquidating_slices():
         long_share=np.full(n, 1.0),  # только лонги
         atr=np.full(n, 1.0),
     )
-    edges = np.arange(50.0, 151.0, 1.0)
+    edges = np.arange(50.0, 251.0, 1.0)  # покрывает lp шорта 1x (~199.5)
     heat = make_real_heat_builder(arr, np.array([1.0]), edges, bar_s=60.0)(np.array([1.0]))
     assert heat.sum() == 0.0  # 1x-лонги никогда не ликвидируются — массы нет
     # а шорты 1x на месте
@@ -642,3 +813,11 @@ def test_real_builder_drops_never_liquidating_slices():
         np.array([1.0])
     )
     assert heat_s.sum() > 0.0
+    # N5: lp вне span сетки -> drop (не клэмп): на узкой сетке шорты 1x дают
+    # ровно ноль массы, краевые бакеты не собирают фиктивное тепло
+    narrow = np.arange(50.0, 151.0, 1.0)
+    heat_n = make_real_heat_builder(arr_short, np.array([1.0]), narrow, bar_s=60.0)(
+        np.array([1.0])
+    )
+    assert heat_n.sum() == 0.0
+    assert heat_n[:, 0].sum() == 0.0 and heat_n[:, -1].sum() == 0.0

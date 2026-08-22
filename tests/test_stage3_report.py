@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
+import pytest
 
 from trading_system.calibration.real_data import (
     bars_to_arrays,
@@ -91,6 +92,37 @@ def test_real_builder_matches_liqmap_replay():
     assert np.all(fast_totals <= inflow + 1e-6)
 
 
+def test_real_builder_vwap_entry():
+    """M4: entry='vwap' сдвигает раскладку при |close - vwap| > bucket_size,
+    бит-в-бит совпадает с close при vwap == close, честная ошибка без vwap."""
+    from trading_system.calibration.real_data import BarArrays
+
+    def one_bar(vwap):
+        return BarArrays(
+            ts=np.array([60_000_000_000], dtype=np.int64),
+            close=np.array([100.0]),
+            low=np.array([100.0]),
+            high=np.array([100.0]),
+            d_oi_usd=np.array([1_000.0]),
+            long_share=np.array([0.5]),
+            atr=np.array([1.0]),
+            vwap=None if vwap is None else np.array([float(vwap)]),
+        )
+
+    edges = np.arange(0.0, 251.0, 1.0)
+    grid = np.array([10.0])
+    w = np.array([1.0])
+    h_close = make_real_heat_builder(one_bar(110.0), grid, edges, bar_s=60.0)(w)
+    h_vwap = make_real_heat_builder(one_bar(110.0), grid, edges, bar_s=60.0, entry="vwap")(w)
+    assert not np.array_equal(h_close, h_vwap)  # |close-vwap|=10 > бакета 1.0
+    h_same = make_real_heat_builder(one_bar(100.0), grid, edges, bar_s=60.0, entry="vwap")(w)
+    assert np.array_equal(h_close, h_same)  # vwap == close -> бит-в-бит
+    with pytest.raises(ValueError):
+        make_real_heat_builder(one_bar(None), grid, edges, bar_s=60.0, entry="vwap")
+    with pytest.raises(ValueError):
+        make_real_heat_builder(one_bar(100.0), grid, edges, bar_s=60.0, entry="open")
+
+
 def test_analyze_passes_gate_a_on_known_truth(tmp_path):
     """SyntheticWorld with a known mixture: calibrated map must beat naive."""
     from scripts.stage3_report import analyze
@@ -110,8 +142,13 @@ def test_analyze_passes_gate_a_on_known_truth(tmp_path):
         seed=7,
     )
     assert res["capture"]["naive"] is not None
+    # headline-метрика по умолчанию: lag = 1 бар И side-aware (стороны есть
+    # в синтетических принтах) — известная истина обязана проходить и так
+    assert res["lag_bars"] == 1 and res["side_aware"] is True
     assert res["gate_a"] is True, res["capture"]
     assert res["capture"]["static"] > res["capture"]["naive"]
+    assert set(res["capture_lag0"]) == {"naive", "static"}  # справочный lag=0 рядом
+    assert all(0.0 <= v <= 1.0 for v in res["capture_by_side"].values())
     assert res["weights"] is not None
     for path, _ in res["figures"]:
         assert path.exists() and path.stat().st_size > 5_000
