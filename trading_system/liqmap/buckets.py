@@ -29,7 +29,17 @@ class PriceBuckets:
         return cls(bucket_size=max(atr * fraction, min_size))
 
     def index(self, price: float) -> int:
-        return math.floor(price / self.bucket_size)
+        # floor(price/size) может ошибиться на 1 у float-границы (деление
+        # округляется через границу); контракт lo(i) <= price < hi(i) обязан
+        # держаться в ТОЙ ЖЕ арифметике, что lo/hi, — иначе consume() видит
+        # бакет, численно не содержащий свою цену. Коррекция до содержащего
+        # тайла (не больше пары шагов: ошибка деления — единицы ulp).
+        i = math.floor(price / self.bucket_size)
+        while price < i * self.bucket_size:
+            i -= 1
+        while price >= (i + 1) * self.bucket_size:
+            i += 1
+        return i
 
     def center(self, index: int) -> float:
         return (index + 0.5) * self.bucket_size
