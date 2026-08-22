@@ -54,9 +54,24 @@ class PriceBuckets:
 def rebucket(
     heat: dict[int, float], old: PriceBuckets, new: PriceBuckets
 ) -> dict[int, float]:
-    """Move heat between grids by bucket centers; total mass is conserved."""
+    """Split each old bucket's mass across new tiles by interval overlap.
+
+    Nearest-center mapping displaced mass by up to half a new bucket per
+    re-size (systematic drift under repeated re-sizing); overlap split is
+    unbiased. The last overlapping tile takes the exact remainder, so total
+    mass is conserved to the bit.
+    """
     out: dict[int, float] = {}
     for idx, h in heat.items():
-        j = new.index(old.center(idx))
-        out[j] = out.get(j, 0.0) + h
+        lo, hi = old.lo(idx), old.hi(idx)
+        width = hi - lo
+        j = new.index(lo)
+        remaining = h
+        if width > 0:
+            while new.hi(j) < hi:
+                part = h * (min(hi, new.hi(j)) - max(lo, new.lo(j))) / width
+                out[j] = out.get(j, 0.0) + part
+                remaining -= part
+                j += 1
+        out[j] = out.get(j, 0.0) + remaining
     return out

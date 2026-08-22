@@ -75,6 +75,34 @@ def test_rebucket_conserves_mass_exactly():
     assert rebucket(heat, b, b) == heat
 
 
+def test_rebucket_splits_by_interval_overlap():
+    """Старый бакет [10, 20) на сетке 4: тайлы [8,12),[12,16),[16,20) берут
+    ровно 2/10, 4/10 и 4/10 массы; центр масс не смещается."""
+    out = rebucket({1: 10.0}, PriceBuckets(10.0), PriceBuckets(4.0))
+    assert out == {2: pytest.approx(2.0), 3: pytest.approx(4.0), 4: pytest.approx(4.0)}
+    # центр масс до: 15.0; после: (2*10 + 4*14 + 4*18)/10 = 14.8 vs 15 — в
+    # пределах полтайла новой сетки, смещение не систематическое
+    com = (2.0 * 10.0 + 4.0 * 14.0 + 4.0 * 18.0) / 10.0
+    assert abs(com - 15.0) <= 2.0
+
+
+def test_rebucket_repeated_resizes_do_not_drift():
+    """300 колебаний сетки ±20%: раньше nearest-center копил снос, сплит по
+    перекрытию держит центр масс у исходной цены."""
+    rng = np.random.default_rng(4)
+    price = 5000.0
+    grid = PriceBuckets(10.0)
+    heat = {grid.index(price): 1000.0}
+    for _ in range(int(300 * SCALE)):
+        new = PriceBuckets(10.0 * float(rng.uniform(0.8, 1.2)))
+        heat = rebucket(heat, grid, new)
+        grid = new
+    total = math.fsum(heat.values())
+    com = math.fsum(grid.center(i) * h for i, h in heat.items()) / total
+    assert total == pytest.approx(1000.0, rel=1e-9)
+    assert abs(com - price) < 3 * grid.bucket_size
+
+
 def test_from_atr_clip_and_guards():
     assert PriceBuckets.from_atr(1e-15).bucket_size == 1e-9
     assert PriceBuckets.from_atr(100.0, fraction=0.1).bucket_size == pytest.approx(10.0)

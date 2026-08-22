@@ -36,6 +36,8 @@ def parse_leverage_brackets(payload: list[dict] | dict) -> BracketTables:
                 max_notional_usd=float(b["notionalCap"]),
                 mmr=float(b["maintMarginRatio"]),
                 cum=float(b["cum"]),
+                # реальный кап плеча тира; без него движок выведет его из mmr
+                max_leverage=float(b["initialLeverage"]) if "initialLeverage" in b else None,
             )
             for b in rows
         )
@@ -59,6 +61,7 @@ def save_brackets(path: str | Path, tables: BracketTables) -> Path:
     doc = {
         sym: [
             {"notionalCap": b.max_notional_usd, "maintMarginRatio": b.mmr, "cum": b.cum}
+            | ({"initialLeverage": b.max_leverage} if b.max_leverage is not None else {})
             for b in rows
         ]
         for sym, rows in tables.items()
@@ -79,6 +82,7 @@ def load_brackets(path: str | Path) -> BracketTables:
                 max_notional_usd=float(b["notionalCap"]),
                 mmr=float(b["maintMarginRatio"]),
                 cum=float(b["cum"]),
+                max_leverage=float(b["initialLeverage"]) if "initialLeverage" in b else None,
             )
             for b in sorted(rows, key=lambda r: float(r["notionalCap"]))
         )

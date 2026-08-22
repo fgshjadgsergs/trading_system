@@ -23,6 +23,8 @@ class MarginBracket:
     max_notional_usd: float
     mmr: float
     cum: float  # maintenance amount deduction, USD
+    # exchange's initialLeverage cap for the tier; None = derive from mmr
+    max_leverage: float | None = None
 
 
 # Reference bracket table (BTCUSDT-like tiers). Tables drift over time and per
@@ -47,6 +49,45 @@ def bracket_for(notional_usd: float, brackets: tuple[MarginBracket, ...]) -> Mar
         if notional_usd <= b.max_notional_usd:
             return b
     return brackets[-1]
+
+
+def _tier_admits(b: MarginBracket, leverage: float) -> bool:
+    # биржа задаёт кап initialLeverage на тир; без него консервативный
+    # эквивалент — mmr < 1/L (иначе позиция родилась бы уже ликвидируемой)
+    return leverage <= b.max_leverage if b.max_leverage is not None else b.mmr < 1 / leverage
+
+
+def admissible_qty(
+    table: tuple[MarginBracket, ...], entry: float, leverage: float, side: Side
+) -> float:
+    """Максимальный размер ОДНОГО счёта (в монетах) на плече L: нотионал на
+    его цене ликвидации сидит ровно на капе последнего допустимого тира.
+
+    Агрегатный слайс ΔOI — это много счетов; тир каждого выбирается его
+    собственным размером, а не суммой слайса. Клэмп представительного счёта
+    до допустимого убирает «невозможные позиции» (тир mmr >= 1/L), которые
+    биржа не дала бы открыть.
+    """
+    if not table:
+        raise ValueError("empty bracket table")
+    adm = None
+    for b in table:
+        if _tier_admits(b, leverage):
+            adm = b
+        else:
+            break
+    if adm is None:
+        raise ValueError(f"leverage {leverage} is not offered by any tier")
+    cap = adm.max_notional_usd
+    if not math.isfinite(cap):
+        return float("inf")
+    # q*lp == cap при тире adm: закрытая форма из lp(q) и q*lp = cap
+    if side is Side.BUY:
+        denom = entry * (1 - 1 / leverage)
+        if denom <= 0:
+            return float("inf")  # long с L<=1 не ликвидируется — кап не нужен
+        return (cap * (1 - adm.mmr) + adm.cum) / denom
+    return (cap * (1 + adm.mmr) - adm.cum) / (entry * (1 + 1 / leverage))
 
 
 def liq_price(
@@ -102,6 +143,10 @@ class BinanceUsdmLiquidation(LiquidationFormula):
         table = self._brackets.get(symbol) if symbol else None
         if table is None or qty is None:
             return liq_price(entry, leverage, side, self._flat_mmr)
+        # Aggregate qty is many accounts, and the tier is per-account: clamp
+        # to the largest single account the exchange admits at this leverage,
+        # so giant slices never land in a born-liquidated tier (mmr >= 1/L).
+        qty = min(qty, admissible_qty(table, entry, leverage, side))
         # The exchange applies the tier containing the notional AT the mark
         # price, so the liquidation price must be tier-self-consistent: solve
         # per tier and accept the tier whose notional range contains qty * LP.

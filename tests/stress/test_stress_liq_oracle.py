@@ -17,6 +17,7 @@ import pytest
 from trading_system.core.liquidation import (
     DEFAULT_BRACKETS,
     BinanceUsdmLiquidation,
+    admissible_qty,
     bracket_for,
 )
 from trading_system.core.schema import Side
@@ -63,12 +64,33 @@ def test_closed_form_solves_margin_equation_random_sweep():
         lp = ENGINE.liq_price(E, L, side, symbol=SYM, qty=q)
         if side is Side.BUY and lp == 0.0:
             continue  # long, который не ликвидируется (L=1) — корректный clamp
-        root = bisect_root(E, L, q, side)
+        # движок клэмпит агрегат до максимального допустимого счёта на плече;
+        # оракул решает уравнение для того же представительного счёта
+        q_eff = min(q, admissible_qty(DEFAULT_BRACKETS, E, L, side))
+        root = bisect_root(E, L, q_eff, side)
         if np.isnan(root):
             continue
         assert abs(lp - root) <= 1e-9 * max(root, 1.0), (E, L, q, side, lp, root)
+        # закрытая красная зона: цена ликвидации всегда по верную сторону входа
+        assert (lp < E) if side is Side.BUY else (lp > E), (E, L, q, side, lp)
         checked += 1
     assert checked > n * 0.9
+
+
+def test_admissible_qty_puts_liq_notional_on_admissible_cap():
+    """Клэмп-счёт сидит нотионалом на цене ликвидации ровно на капе
+    последнего тира с mmr < 1/L; его тир никогда не «рождён ликвидируемым»."""
+    rng = np.random.default_rng(11)
+    for _ in range(int(2000 * SCALE)):
+        E = float(10 ** rng.uniform(-1, 5))
+        L = float(rng.choice([5, 10, 20, 50, 100, 125]))
+        side = Side.BUY if rng.random() < 0.5 else Side.SELL
+        q_max = admissible_qty(DEFAULT_BRACKETS, E, L, side)
+        adm = [b for b in DEFAULT_BRACKETS if b.mmr < 1 / L][-1]
+        lp = ENGINE.liq_price(E, L, side, symbol=SYM, qty=q_max)
+        assert q_max * lp == pytest.approx(adm.max_notional_usd, rel=1e-9)
+        # нотионал сидит на капе с точностью до ulp — проверяем тир чуть внутри
+        assert bracket_for(q_max * lp * (1 - 1e-9), DEFAULT_BRACKETS).mmr < 1 / L
 
 
 def test_tier_boundaries_match_equation():
@@ -77,8 +99,9 @@ def test_tier_boundaries_match_equation():
         for side in (Side.BUY, Side.SELL):
             E = 100.0
             q = cap / E  # нотионал ликвидации оказывается в окрестности cap
+            q_eff = min(q, admissible_qty(DEFAULT_BRACKETS, E, 10, side))
             lp = ENGINE.liq_price(E, 10, side, symbol=SYM, qty=q)
-            root = bisect_root(E, 10, q, side)
+            root = bisect_root(E, 10, q_eff, side)
             assert abs(lp - root) <= 1e-9 * max(root, 1.0), (cap, side, lp, root)
 
 

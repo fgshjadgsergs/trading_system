@@ -389,15 +389,11 @@ def test_bracket_notional_beyond_last_tier_and_boundaries():
     assert lp125 == pytest.approx(liq_price(100.0, 125, Side.BUY, 0.004), rel=1e-12)
 
 
-@pytest.mark.xfail(
-    reason="дизайн: таблицы брекетов не несут initialLeverage-капы биржи, поэтому "
-    "гигантский слайс на высоком плече попадает в тир с mmr >= 1/L (зона мгновенной "
-    "ликвидации) и его lp оказывается по НЕПРАВИЛЬНУЮ сторону от входа — шорт-тепло "
-    "ложится ниже цены. На реальной бирже такая позиция неоткрываема; корректный фикс "
-    "требует initialLeverage в таблицах, а не правки формулы",
-    strict=True,
-)
 def test_bracket_map_side_invariant_for_giant_slices():
+    # раньше strict xfail: гигантский слайс попадал в тир mmr >= 1/L и тепло
+    # ложилось по неверную сторону входа; закрыто клэмпом admissible_qty —
+    # тир выбирается по максимальному ДОПУСТИМОМУ для плеча счёту, а не по
+    # агрегатному нотионалу слайса
     from trading_system.collectors.brackets import bracket_liq_price_fn
 
     fn = bracket_liq_price_fn({"BTCUSDT": DEFAULT_BRACKETS}, "BTCUSDT")
