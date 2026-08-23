@@ -52,6 +52,7 @@ from trading_system.calibration.weights import (
     StaticWeightCalibrator,
     capture_details,
     capture_rate,
+    hot_area_share,
     naive_baseline_heat,
 )
 from trading_system.collectors.brackets import bracket_liq_price_fn, load_brackets
@@ -151,27 +152,13 @@ def analyze(
     capture: dict[str, float | None] = {}
     capture_lag0: dict[str, float] = {}
     capture_by_side: dict[str, float | None] = {}
+    alert_area: dict[str, float] = {}
+    lift: dict[str, float] = {}
     weights = None
     if n_liq_train == 0 or n_liq_test == 0:
         log.warning("no_liquidation_truth", train=n_liq_train, test=n_liq_test)
     else:
-        # the baseline is an OPPONENT: score both the side-agnostic levels and
-        # the same levels split by side geometry (long below price, short
-        # above) and keep the stronger one. Either can win — under a lag the
-        # split halves are cut at the snapshot's price, not the event's — and
-        # beating only the weaker variant would be self-deception.
         side_aware = build_split is not None and "side" in liqs.columns
-        naive_variants = [naive_baseline_heat(arr.close, edges)]
-        if side_aware:
-            naive_variants.append(naive_baseline_heat(arr.close, edges, split_sides=True))
-        capture["naive"] = max(
-            capture_rate(h, arr.ts, edges, liqs, top_decile, test_range, lag_ns)
-            for h in naive_variants
-        )
-        capture_lag0["naive"] = max(
-            capture_rate(h, arr.ts, edges, liqs, top_decile, test_range, 0)
-            for h in naive_variants
-        )
         cal = StaticWeightCalibrator(
             n_weights=len(grid), seed=seed, n_candidates=n_candidates,
             top_decile=top_decile, lag_ns=lag_ns,
@@ -185,6 +172,38 @@ def analyze(
         )
         capture_lag0["static"] = capture_rate(
             static_heat, arr.ts, edges, liqs, top_decile, test_range, 0
+        )
+        # The baseline is an OPPONENT and must be given a fair shot. Two axes:
+        # (a) side geometry — the same levels split long-below/short-above;
+        # (b) ALERT AREA — a dense map saturates the top-decile budget while
+        # sparse levels mark a fraction of it, so raw capture partly measures
+        # area rather than accuracy. Widen the baseline's levels until it
+        # marks comparable ground, then score every variant and keep the
+        # strongest: beating only the weakest opponent is self-deception.
+        map_area = hot_area_share(static_heat, top_decile)
+        naive_variants = [naive_baseline_heat(arr.close, edges)]
+        if side_aware:
+            naive_variants.append(naive_baseline_heat(arr.close, edges, split_sides=True))
+        dilate = 0
+        while dilate < 32 and hot_area_share(naive_variants[0], top_decile) < map_area:
+            dilate += 1
+            naive_variants[0] = naive_baseline_heat(arr.close, edges, dilate_cells=dilate)
+            if side_aware:
+                naive_variants[1] = naive_baseline_heat(
+                    arr.close, edges, split_sides=True, dilate_cells=dilate
+                )
+        naive_area = hot_area_share(naive_variants[0], top_decile)
+        log.info("alert_area", map=round(map_area, 4), naive=round(naive_area, 4),
+                 dilate_cells=dilate)
+        alert_area = {"static": float(map_area), "naive": float(naive_area),
+                      "dilate_cells": float(dilate)}
+        capture["naive"] = max(
+            capture_rate(h, arr.ts, edges, liqs, top_decile, test_range, lag_ns)
+            for h in naive_variants
+        )
+        capture_lag0["naive"] = max(
+            capture_rate(h, arr.ts, edges, liqs, top_decile, test_range, 0)
+            for h in naive_variants
         )
         if build_split is not None:
             details = capture_details(
@@ -251,6 +270,10 @@ def analyze(
             (save_fig(fig, f"{symbol.lower()}_s3_capture_ladder", out_dir), "Gate A: capture ladder")
         )
 
+    if capture.get("static") is not None:
+        for key in ("static", "naive"):
+            area = alert_area.get(key, 0.0)
+            lift[key] = capture[key] / area if area > 0 else float("nan")
     gate_a = (
         capture.get("static") is not None
         and capture.get("naive") is not None
@@ -263,6 +286,8 @@ def analyze(
         "capture_by_side": capture_by_side,
         "lag_bars": int(lag_bars),
         "side_aware": build_split is not None,
+        "alert_area": alert_area,  # доля помеченных горячими ячеек, карта/бейзлайн
+        "lift": lift,  # capture, нормированный на площадь тревоги
         "weights": weights.tolist() if weights is not None else None,
         "gate_a": gate_a if capture else None,
         "reversal_effect": rev.stats.effect if rev else None,
@@ -370,9 +395,20 @@ def main(argv: list[str] | None = None, fetch=None) -> None:
     else:
         naive_s = f"{cap['naive']:.4f}"
         static_s = f"{cap['static']:.4f}"
+        area = res.get("alert_area") or {}
+        lift = res.get("lift") or {}
         metric_s = (
             f"headline-метрика: OOS capture с lag={res['lag_bars']} бар"
             + (", side-aware по сторонам принтов" if res["side_aware"] else "")
+            + (
+                f"; площадь тревоги выровнена (карта {area.get('static', 0):.3f} "
+                f"против бейзлайна {area.get('naive', 0):.3f} доли сетки, "
+                f"дилатация уровней {int(area.get('dilate_cells', 0))} ячеек), "
+                f"lift карты {lift.get('static', float('nan')):.2f} против "
+                f"{lift.get('naive', float('nan')):.2f} у бейзлайна"
+                if area
+                else ""
+            )
         )
         if res["gate_a"]:
             verdict = (

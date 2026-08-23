@@ -154,3 +154,71 @@ def test_tolerance_dilation_is_symmetric_and_bounded():
         liqs = liq_frame([(int(ts[4]) + 1, 20.5 + dist, 1_000.0, Side.SELL)])
         got = capture_rate(heat, ts, edges, liqs, 0.05, None, 0, tol)
         assert got == pytest.approx(want), (dist, tol)
+
+
+def test_gate_a_canary_does_not_pass_on_noise():
+    """КАНАРЕЙКА: на мире, где принты НЕ связаны с картой (ликвидации сыплются
+    у текущей цены независимо от ΔOI), вердикт Gate A не должен проходить.
+
+    Без выравнивания площади тревоги старое правило `static > naive` проходило
+    здесь почти всегда: карта помечает горячими ~10% сетки, разреженный
+    бейзлайн — около процента, и метрика мерила площадь, а не точность.
+    """
+    import polars as pl
+
+    from scripts.stage3_report import analyze
+    from trading_system.calibration.synthetic import make_world
+    from trading_system.core.timeutils import NS_PER_MIN
+
+    world = make_world(n_bars=1_500, seed=11)
+    closes = world.prices
+    lows = np.minimum(np.concatenate([[closes[0]], closes[:-1]]), closes)
+    highs = np.maximum(np.concatenate([[closes[0]], closes[:-1]]), closes)
+    bars = pl.DataFrame(
+        {
+            "ts_open": world.ts - NS_PER_MIN,
+            "ts_close": world.ts,
+            "close": closes,
+            "low": lows,
+            "high": highs,
+            "open": np.concatenate([[closes[0]], closes[:-1]]),
+            "quote_volume": np.full(len(closes), 1.0),
+            "d_oi_usd": world.entry_notional,
+            "atr": np.full(len(closes), world.atr),
+        }
+    )
+    # шумовые принты: у текущей цены, без всякой связи с картой
+    rng = np.random.default_rng(11)
+    idx = rng.integers(len(closes) // 3, len(closes), size=400)
+    noise = pl.DataFrame(
+        {
+            "ts_event": (world.ts[idx] + NS_PER_MIN // 2).astype(np.int64),
+            "price": closes[idx] * (1.0 + rng.normal(0, 0.0005, len(idx))),
+            "qty_usd": np.abs(rng.lognormal(9.0, 1.0, len(idx))),
+            "side": [Side.SELL if v else Side.BUY for v in rng.integers(0, 2, len(idx))],
+        }
+    )
+    cfg = {
+        "project": {"seed": 11},
+        "liqmap": {
+            "leverage_grid": [10, 25, 50, 100],
+            "bucket_atr_fraction": 0.1,
+            "decay_half_life_s": 86_400,
+            "long_share_default": 0.5,
+            "maint_margin_rate_flat": 0.005,
+        },
+    }
+    res = analyze(
+        bars, noise, cfg, tmp_dir(), world.symbol, timeframe="1m",
+        test_frac=0.3, embargo_days=0.05, n_candidates=8, seed=11,
+    )
+    area = res["alert_area"]
+    assert area["naive"] >= 0.5 * area["static"], area  # площади выровнены
+    assert res["gate_a"] is not True, (res["capture"], area, res["lift"])
+
+
+def tmp_dir():
+    import tempfile
+    from pathlib import Path
+
+    return Path(tempfile.mkdtemp())

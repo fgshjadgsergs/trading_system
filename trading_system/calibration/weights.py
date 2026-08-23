@@ -196,6 +196,12 @@ def flow_divergence(
     heat_ts = np.asarray(heat_ts)
     prices = np.asarray(prices, dtype=float)
     edges = np.asarray(bucket_edges, dtype=float)
+    heat = np.asarray(heat)
+    if heat.ndim != 2:
+        # side-split heat would be sliced along the SIDE axis here, silently
+        # producing inf and (through fit) a "result" of uniform weights
+        raise ValueError("flow_divergence needs glued (n, nb) heat, got shape "
+                         f"{heat.shape}; sum the side halves first")
     n, nb = len(heat_ts), len(edges) - 1
     if len(prices) != n or heat.shape[0] != n:
         raise ValueError("prices and heat rows must align with heat_ts")
@@ -266,6 +272,23 @@ def calibration_curve(
 # ---------------------------------------------------------------------------
 
 
+def hot_area_share(heat: np.ndarray, top_decile: float = 0.1) -> float:
+    """Mean share of cells a map actually marks hot.
+
+    The top-decile budget is `floor(nb * top_decile)` cells, but a mask only
+    takes cells with positive heat: a dense map saturates the budget while a
+    sparse baseline marks a fraction of it. Comparing their capture without
+    this number compares alert area, not accuracy — so it is reported next to
+    capture, and lift = capture / hot_area_share is the area-normalised score.
+    """
+    heat = np.asarray(heat)
+    rows = heat.reshape(-1, heat.shape[-1]) if heat.ndim == 3 else heat
+    if rows.size == 0:
+        return 0.0
+    shares = [top_decile_mask(row, top_decile).sum() / rows.shape[1] for row in rows]
+    return float(np.mean(shares))
+
+
 def naive_baseline_heat(
     prices: np.ndarray,
     bucket_edges: np.ndarray,
@@ -274,6 +297,7 @@ def naive_baseline_heat(
     big_round_weight: float = 2.5,
     swing_weight: float = 2.0,
     split_sides: bool = False,
+    dilate_cells: int = 0,
 ) -> np.ndarray:
     """Heat at round price levels plus trailing swing extremes.
 
@@ -311,6 +335,20 @@ def naive_baseline_heat(
             b = int(np.searchsorted(edges, level, side="right") - 1)
             if 0 <= b < nb:
                 heat[t, b] += swing_weight
+    if dilate_cells > 0:
+        # give the baseline the same alert AREA as a dense map: each level
+        # bleeds into `dilate_cells` neighbours on both sides with decaying
+        # weight, so it marks comparable ground instead of losing on sparsity
+        kernel = np.array([0.5 ** abs(d) for d in range(-dilate_cells, dilate_cells + 1)])
+        widened = np.zeros_like(heat)
+        for off, kw in zip(range(-dilate_cells, dilate_cells + 1), kernel, strict=True):
+            if off < 0:
+                widened[:, :off] += kw * heat[:, -off:]
+            elif off > 0:
+                widened[:, off:] += kw * heat[:, :-off]
+            else:
+                widened += kw * heat
+        heat = widened
     if not split_sides:
         return heat
     centers = 0.5 * (edges[:-1] + edges[1:])
@@ -332,6 +370,9 @@ class FitResult:
     objective: float
     capture: float
     flow_kl: float
+    # True when no candidate scored a finite objective: the weights are the
+    # uniform prior, NOT a fit — consumers must not report them as calibrated
+    degenerate: bool = False
 
 
 class StaticWeightCalibrator:
@@ -413,6 +454,12 @@ class StaticWeightCalibrator:
             if best is None or obj > best[0]:
                 best = (obj, cap, fkl, w)
         assert best is not None
+        degenerate = not np.isfinite(best[0])
+        if degenerate:
+            # nothing could be scored (no events in the window, or a builder
+            # that yields no usable heat): the uniform prior is returned as
+            # before, but flagged — a silent "fit" here looks like a result
+            log.warning("static_fit_degenerate", reason="no finite objective")
         for _ in range(self.refine_sweeps):
             improved = False
             for j in range(k):
@@ -428,7 +475,8 @@ class StaticWeightCalibrator:
                 break
         log.debug("static_fit", capture=best[1], flow_kl=best[2], weights=best[3].tolist())
         return FitResult(
-            weights=best[3], objective=float(best[0]), capture=float(best[1]), flow_kl=float(best[2])
+            weights=best[3], objective=float(best[0]), capture=float(best[1]),
+            flow_kl=float(best[2]), degenerate=degenerate,
         )
 
 
