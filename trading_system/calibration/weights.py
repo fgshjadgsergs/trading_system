@@ -273,32 +273,52 @@ def naive_baseline_heat(
     round_weight: float = 1.0,
     big_round_weight: float = 2.5,
     swing_weight: float = 2.0,
+    split_sides: bool = False,
 ) -> np.ndarray:
     """Heat at round price levels plus trailing swing extremes.
 
-    Round levels use a grid set by the price magnitude (e.g. every 1000 for a
-    5-figure price, every-5000 levels weighted higher). Swing extremes are the
-    trailing rolling max/min of the price. Fully causal: row t depends on
-    prices[: t + 1] only. This is the baseline the calibrated map must beat.
+    Round levels use a grid set by the magnitude of the CURRENT price (every
+    1000 for a 5-figure price, every-5000 levels weighted higher) — deriving
+    the grid from the median of the whole series let the baseline's first row
+    depend on where price would go later, i.e. lookahead in the judge itself.
+    Swing extremes are the trailing rolling max/min. Fully causal: row t
+    depends on prices[: t + 1] only. This is the baseline the calibrated map
+    must beat.
+
+    `split_sides` returns (n, 2, nb) — the same levels, but the long half
+    keeps only cells below the current price and the short half only cells
+    above (longs liquidate downwards). That is geometry any trader knows, so
+    scoring a side-aware map against a side-agnostic baseline would flatter
+    the map; this is the stricter, fairer opponent.
     """
     prices = np.asarray(prices, dtype=float)
     edges = np.asarray(bucket_edges, dtype=float)
     n, nb = len(prices), len(edges) - 1
     heat = np.zeros((n, nb))
-    step = 10.0 ** (np.floor(np.log10(np.median(prices))) - 1.0)
-    base = np.zeros(nb)
-    for m in range(int(np.ceil(edges[0] / step)), int(np.floor(edges[-1] / step)) + 1):
-        b = int(np.searchsorted(edges, m * step, side="right") - 1)
-        if 0 <= b < nb:
-            base[b] += big_round_weight if m % 5 == 0 else round_weight
-    heat[:] = base
+    # grid magnitude per bar from that bar's own price; bars sharing a step
+    # share one precomputed row of round levels (usually 1-2 groups per run)
+    steps = 10.0 ** (np.floor(np.log10(np.maximum(prices, 1e-12))) - 1.0)
+    for step in np.unique(steps):
+        base = np.zeros(nb)
+        for m in range(int(np.ceil(edges[0] / step)), int(np.floor(edges[-1] / step)) + 1):
+            b = int(np.searchsorted(edges, m * step, side="right") - 1)
+            if 0 <= b < nb:
+                base[b] += big_round_weight if m % 5 == 0 else round_weight
+        heat[steps == step] = base
     for t in range(n):
         window = prices[max(0, t - swing_window + 1) : t + 1]
         for level in (window.max(), window.min()):
             b = int(np.searchsorted(edges, level, side="right") - 1)
             if 0 <= b < nb:
                 heat[t, b] += swing_weight
-    return heat
+    if not split_sides:
+        return heat
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    below = centers[None, :] < prices[:, None]
+    out = np.zeros((n, 2, nb))
+    out[:, 0, :] = heat * below  # long heat sits below price
+    out[:, 1, :] = heat * ~below
+    return out
 
 
 # ---------------------------------------------------------------------------

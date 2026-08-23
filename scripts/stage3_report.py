@@ -155,11 +155,23 @@ def analyze(
     if n_liq_train == 0 or n_liq_test == 0:
         log.warning("no_liquidation_truth", train=n_liq_train, test=n_liq_test)
     else:
-        naive = naive_baseline_heat(arr.close, edges)
-        # naive is side-agnostic (same levels both sides): its side-aware
-        # capture equals the glued one, so the 2-d score is the fair baseline
-        capture["naive"] = capture_rate(naive, arr.ts, edges, liqs, top_decile, test_range, lag_ns)
-        capture_lag0["naive"] = capture_rate(naive, arr.ts, edges, liqs, top_decile, test_range, 0)
+        # the baseline is an OPPONENT: score both the side-agnostic levels and
+        # the same levels split by side geometry (long below price, short
+        # above) and keep the stronger one. Either can win — under a lag the
+        # split halves are cut at the snapshot's price, not the event's — and
+        # beating only the weaker variant would be self-deception.
+        side_aware = build_split is not None and "side" in liqs.columns
+        naive_variants = [naive_baseline_heat(arr.close, edges)]
+        if side_aware:
+            naive_variants.append(naive_baseline_heat(arr.close, edges, split_sides=True))
+        capture["naive"] = max(
+            capture_rate(h, arr.ts, edges, liqs, top_decile, test_range, lag_ns)
+            for h in naive_variants
+        )
+        capture_lag0["naive"] = max(
+            capture_rate(h, arr.ts, edges, liqs, top_decile, test_range, 0)
+            for h in naive_variants
+        )
         cal = StaticWeightCalibrator(
             n_weights=len(grid), seed=seed, n_candidates=n_candidates,
             top_decile=top_decile, lag_ns=lag_ns,
