@@ -224,6 +224,13 @@ def _parse_ratio_points(
         sym = it.get("symbol", symbol)
         if sym is None:
             raise ValueError(f"{metric}: payload has no symbol and none was given")
+        if not (0.0 <= long_share <= 1.0):
+            # negative/overflowing volumes and other malformed prints are
+            # dropped here, where the damage is local: downstream one bad
+            # share used to skew the whole blend into a clip edge
+            log.warning("ratio_point_dropped", metric=str(metric.value),
+                        symbol=sym, long_share=long_share)
+            continue
         out.append(
             RatioPoint(
                 exchange=EXCHANGE,

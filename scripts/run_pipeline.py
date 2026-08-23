@@ -124,6 +124,7 @@ def stage_map(
     ratios: pl.DataFrame | None = None,
     brackets_path: str | None = None,
     entry_price: str = "close",
+    sides_kwargs: dict | None = None,
 ) -> tuple[LiqMap, HeatHistory]:
     """`entry_price` (M4): "close" (default, бит-в-бит старое поведение) or
     "vwap" — allocate each bar's ΔOI at the bar VWAP (vwap_bar column, or
@@ -150,7 +151,7 @@ def stage_map(
         decay_half_life_s=float(lm_cfg["decay_half_life_s"]),
     )
     if ratios is not None and ratios.height:  # track B2: causal per-bar side shares
-        bars = join_long_share(bars, ratios)
+        bars = join_long_share(bars, ratios, **(sides_kwargs or {}))
     if entry_price == "vwap":
         if "vwap_bar" in bars.columns:
             bars = bars.with_columns(pl.col("vwap_bar").alias("_entry"))
