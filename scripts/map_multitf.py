@@ -96,10 +96,18 @@ def bars_from_lake(lake: Path, symbol: str, timeframe: str, limit: int) -> pl.Da
     return bars.with_columns(pl.col("d_oi_usd").fill_null(0.0))
 
 
-def build_map(bars: pl.DataFrame, bar_s: float, half_life_s: float, **kw):
+def build_map(bars: pl.DataFrame, bar_s: float, half_life_s: float,
+              bucket_bps: float = 0.0, **kw):
+    # Сетка бакетов — свойство ИНСТРУМЕНТА, а не нарезки баров (тот же довод,
+    # что и для полураспада). ATR минутного бара в ~40 раз меньше часового,
+    # и карта на 1m вырождается в сплошную заливку из тысяч волосяных уровней.
+    # bucket_bps задаёт шаг в долях цены (10 bps = 0.1%), единый для всех ТФ.
+    buckets = (PriceBuckets(float(bars["close"][-1]) * bucket_bps * 1e-4)
+               if bucket_bps > 0 else
+               PriceBuckets.from_atr(float(np.nanmedian(bars["atr"])), 0.1))
     lm = LiqMap(
         leverage_grid=GRID,
-        buckets=PriceBuckets.from_atr(float(np.nanmedian(bars["atr"])), 0.1),
+        buckets=buckets,
         weight_fn=StaticWeights(SEED_W),
         decay_half_life_s=half_life_s,
         **kw,
@@ -127,6 +135,9 @@ def main() -> None:
     ap.add_argument("--half-life-h", type=float, default=24.0,
                     help="полураспад тепла в ЧАСАХ — один для всех таймфреймов")
     ap.add_argument("--close-out-fraction", type=float, default=1.0)
+    ap.add_argument("--bucket-bps", type=float, default=0.0,
+                    help="шаг ценового бакета в bps от цены, единый для всех ТФ "
+                         "(0 = из ATR своего таймфрейма, прежнее поведение)")
     ap.add_argument("--out", default="reports/multitf")
     args = ap.parse_args()
     out = Path(args.out)
@@ -144,10 +155,11 @@ def main() -> None:
                              daily_vol=args.daily_vol, oi_daily_usd=args.oi_daily)
                 if args.synthetic
                 else bars_from_lake(Path(args.lake), args.symbol, tf, n_bars))
-        lm, hist = build_map(bars, bar_s, half_life,
+        lm, hist = build_map(bars, bar_s, half_life, bucket_bps=args.bucket_bps,
                              close_out_fraction=args.close_out_fraction)
         title = (f"{args.symbol} · {tf} · {bars.height} баров ({args.days} дней) · "
                  f"полураспад {args.half_life_h:.0f} ч"
+                 + (f" · бакет {args.bucket_bps:g} bps" if args.bucket_bps > 0 else "")
                  + ("" if args.lake else " · демо-ряд"))
         path = terminal_heat_overlay(bars, hist, name=f"map_{args.symbol.lower()}_{tf}",
                                      out_dir=out, title=title)

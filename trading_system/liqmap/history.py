@@ -95,6 +95,8 @@ class HeatHistory:
         if not self._frames:
             return np.array([]), np.array([]), np.zeros((0, 0))
         occupied = sorted({i for f in self._frames for i in f})
+        if not occupied:  # кадры есть, но карта пуста (нулевой приток OI)
+            return np.asarray(self.ts), np.array([]), np.zeros((0, len(self._frames)))
         lo, hi = occupied[0], occupied[-1]
         if max_rows is not None and hi - lo + 1 > max_rows:
             mass: dict[int, float] = {}

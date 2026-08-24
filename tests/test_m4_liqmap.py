@@ -432,3 +432,47 @@ def test_terminal_overlay_renders(tmp_path):
     bars, lm, hist = build_demo_map(seed=42)
     p = terminal_heat_overlay(bars, hist, name="terminal_test", out_dir=tmp_path)
     assert p.exists() and p.stat().st_size > 20_000
+
+
+def test_terminal_overlay_empty_map_renders(tmp_path):
+    """Пустая карта (нулевой приток OI) раньше роняла matrix() по IndexError
+    на occupied[0]; теперь отдаёт пустую сетку, а оверлей рисует пустой
+    экран с невырожденным диапазоном цены."""
+    import polars as pl
+
+    from trading_system.liqmap.history import HeatHistory
+    from trading_system.liqmap.terminal import terminal_heat_overlay
+
+    lm = LiqMap(
+        leverage_grid=[10],
+        buckets=PriceBuckets(1.0),
+        weight_fn=StaticWeights(np.array([1.0])),
+        decay_half_life_s=1e9,
+    )
+    hist = HeatHistory(lm)
+    step_ns = 60_000_000_000
+    bars = pl.DataFrame({
+        "ts_open": [0, step_ns], "ts_close": [step_ns, 2 * step_ns],
+        "open": [100.0, 100.0], "high": [100.0, 100.0],
+        "low": [100.0, 100.0], "close": [100.0, 100.0],
+    })
+    for t in (step_ns, 2 * step_ns):
+        lm.step(100.0, 100.0, 100.0, 0.0, dt_s=60.0)
+        hist.record(t)
+    ts, prices, H = hist.matrix()
+    assert ts.shape == (2,) and prices.size == 0 and H.shape == (0, 2)
+    assert terminal_heat_overlay(bars, hist, name="empty", out_dir=tmp_path).exists()
+
+
+def test_terminal_overlay_quantile_contrast_is_opt_outable(tmp_path):
+    """Квантильная нормировка цвета — только представление: файл рисуется и
+    с ней, и с полным диапазоном (q_lo=0, q_hi=1 — прежнее поведение)."""
+    from trading_system.liqmap.reports import build_demo_map
+    from trading_system.liqmap.terminal import terminal_heat_overlay
+
+    bars, lm, hist = build_demo_map(seed=42)
+    a = terminal_heat_overlay(bars, hist, name="q_default", out_dir=tmp_path)
+    b = terminal_heat_overlay(bars, hist, name="q_full", out_dir=tmp_path,
+                              q_lo=0.0, q_hi=1.0)
+    assert a.exists() and b.exists()
+    assert a.read_bytes() != b.read_bytes()  # нормировка действительно применяется

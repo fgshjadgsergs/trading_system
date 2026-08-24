@@ -56,12 +56,20 @@ def terminal_heat_overlay(
     project_frac: float = 0.18,
     top_labels: int = 6,
     y_pad_frac: float = 0.10,
+    q_lo: float = 0.55,
+    q_hi: float = 0.995,
 ) -> Path:
     """Candles over banded liquidation heat, terminal-style, saved as png.
 
     y range = the traded range padded by `y_pad_frac` of the last close, so
     near-leverage bands frame the price; the deepest low-leverage pools fall
     off-screen by design (as in the reference terminals).
+
+    Colour maps log1p(heat) between the `q_lo` and `q_hi` quantiles of the
+    non-zero heat, not between 0 and the max: on dense grids (a minute chart
+    holds thousands of small pools) a full-range log scale lifts every weak
+    pool into the bright half and the panel turns into a solid wash. Pass
+    q_lo=0.0, q_hi=1.0 for the plain full-range scale.
     """
     ts, prices, H = hist.matrix()
     n_bars = bars.height
@@ -69,9 +77,10 @@ def terminal_heat_overlay(
     n_proj = max(1, int(n_cols * project_frac))
     if H.size:
         H_ext = np.hstack([H, np.tile(H[:, -1:], (1, n_proj))])
-    else:
+    else:  # пустая карта: рисуем один пустой ряд с невырожденным extent
         H_ext = np.zeros((1, n_cols + n_proj))
-        prices = np.array([float(bars["close"][0])])
+        c0 = float(bars["close"][0])
+        prices = np.array([c0 * 0.999, c0 * 1.001])
 
     last_close = float(bars["close"][-1])
     pad = last_close * y_pad_frac
@@ -81,13 +90,23 @@ def terminal_heat_overlay(
     fig, ax = plt.subplots(figsize=(15, 8))
     fig.patch.set_facecolor(GROUND)
     ax.set_facecolor(PANEL)
+    shown = np.log1p(H_ext)
+    nz = shown[shown > 0.0]
+    vmin, vmax = (0.0, None)
+    if nz.size and (q_lo > 0.0 or q_hi < 1.0):
+        vmin = float(np.quantile(nz, q_lo))
+        vmax = float(np.quantile(nz, q_hi))
+        if not vmax > vmin:  # вырожденный случай (все пулы одинаковы)
+            vmin, vmax = 0.0, None
     ax.imshow(
-        np.log1p(H_ext),
+        shown,
         aspect="auto",
         origin="lower",
         extent=(0, n_cols + n_proj, float(prices[0]), float(prices[-1])),
         cmap=HEAT_CMAP,
         interpolation="nearest",
+        vmin=vmin,
+        vmax=vmax,
         zorder=1,
     )
 
