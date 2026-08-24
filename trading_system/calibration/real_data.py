@@ -220,6 +220,7 @@ def make_real_heat_builder(
     entry: str = "close",
     split_sides: bool = False,
     fractional_edge_consume: bool = False,
+    close_out_fraction: float = 1.0,
 ) -> HeatBuilder:
     """build(w) -> (n_bars, n_buckets) heat matrices under mixture w.
 
@@ -384,7 +385,10 @@ def make_real_heat_builder(
             elif usd < 0.0:
                 total = rows.sum()
                 if total > 0.0:
-                    rows *= max(0.0, 1.0 + usd / total)  # proportional close-out
+                    # proportional close-out, scaled by close_out_fraction
+                    # (mirrors LiqMap: not every closed position was carrying
+                    # heat, so charging the full ΔOI⁻ drains untouched levels)
+                    rows *= max(0.0, 1.0 + usd * close_out_fraction / total)
             rows *= decay
             heat[t] = rows
         return heat

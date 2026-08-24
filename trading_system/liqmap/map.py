@@ -103,6 +103,7 @@ class LiqMap:
         blur_sigma0_bps: float | None = None,
         blur_sigma1: float = 0.0,
         fractional_edge_consume: bool = False,
+        close_out_fraction: float = 1.0,
     ) -> None:
         """`typical_account_usd` (M1, opt-in): with a 4-argument (bracket)
         liq_price_fn, the maintenance tier is picked for a REPRESENTATIVE
@@ -154,6 +155,14 @@ class LiqMap:
         self.blur_sigma0_bps = blur_sigma0_bps
         self.blur_sigma1 = blur_sigma1
         self.fractional_edge_consume = fractional_edge_consume
+        if not 0.0 <= close_out_fraction <= 1.0:
+            raise ValueError("close_out_fraction in [0, 1]")
+        # share of a negative ΔOI that removes heat. 1.0 (default) assumes
+        # every voluntarily closed position was carrying heat somewhere on the
+        # map; in practice much of the closing flow is positions far from
+        # liquidation (or already-consumed ones), and charging the full amount
+        # against the map drains levels the price never reached
+        self.close_out_fraction = close_out_fraction
         self.heat: dict[Side, dict[int, float]] = {Side.BUY: {}, Side.SELL: {}}
         # public accumulators stay plain readable/writable floats; each has a
         # private Neumaier carry (N3) so the mass identity holds to ~1 ulp of
@@ -204,7 +213,7 @@ class LiqMap:
         if d_oi_usd == 0.0:
             return
         if d_oi_usd < 0.0:
-            self._remove_proportional(-d_oi_usd)
+            self._remove_proportional(-d_oi_usd * self.close_out_fraction)
             return
         if not (math.isfinite(price) and price > 0):
             raise ValueError("price must be positive and finite")
