@@ -31,6 +31,7 @@ from trading_system.core.timeutils import TIMEFRAME_NS
 from trading_system.liqmap.buckets import PriceBuckets
 from trading_system.liqmap.history import HeatHistory
 from trading_system.liqmap.map import LiqMap, StaticWeights
+from trading_system.liqmap.mixture import MixtureLiqMap
 from trading_system.liqmap.terminal import terminal_heat_overlay
 from trading_system.viz.style import PALETTE, apply_style, save_fig
 
@@ -96,8 +97,18 @@ def bars_from_lake(lake: Path, symbol: str, timeframe: str, limit: int) -> pl.Da
     return bars.with_columns(pl.col("d_oi_usd").fill_null(0.0))
 
 
+def parse_mixture(spec: str) -> list[tuple[float, float]]:
+    """`0.75:4,0.25:336` -> [(0.75, 4ч в секундах), (0.25, 336ч)]."""
+    out = []
+    for part in spec.split(","):
+        w, hl = part.split(":")
+        out.append((float(w), float(hl) * 3600.0))
+    return out
+
+
 def build_map(bars: pl.DataFrame, bar_s: float, half_life_s: float,
-              bucket_bps: float = 0.0, **kw):
+              bucket_bps: float = 0.0, mixture: list[tuple[float, float]] | None = None,
+              lev_tiers: list[tuple[float, float]] | None = None, **kw):
     # Сетка бакетов — свойство ИНСТРУМЕНТА, а не нарезки баров (тот же довод,
     # что и для полураспада). ATR минутного бара в ~40 раз меньше часового,
     # и карта на 1m вырождается в сплошную заливку из тысяч волосяных уровней.
@@ -105,13 +116,13 @@ def build_map(bars: pl.DataFrame, bar_s: float, half_life_s: float,
     buckets = (PriceBuckets(float(bars["close"][-1]) * bucket_bps * 1e-4)
                if bucket_bps > 0 else
                PriceBuckets.from_atr(float(np.nanmedian(bars["atr"])), 0.1))
-    lm = LiqMap(
-        leverage_grid=GRID,
-        buckets=buckets,
-        weight_fn=StaticWeights(SEED_W),
-        decay_half_life_s=half_life_s,
-        **kw,
-    )
+    common = dict(leverage_grid=GRID, buckets=buckets, weight_fn=StaticWeights(SEED_W))
+    if lev_tiers is not None:
+        lm = MixtureLiqMap.by_leverage(lev_tiers, **common, **kw)
+    elif mixture is not None:
+        lm = MixtureLiqMap(mixture, **common, **kw)
+    else:
+        lm = LiqMap(decay_half_life_s=half_life_s, **common, **kw)
     hist = HeatHistory(lm)
     ls = "long_share" in bars.columns
     for r in bars.iter_rows(named=True):
@@ -135,6 +146,12 @@ def main() -> None:
     ap.add_argument("--half-life-h", type=float, default=24.0,
                     help="полураспад тепла в ЧАСАХ — один для всех таймфреймов")
     ap.add_argument("--close-out-fraction", type=float, default=1.0)
+    ap.add_argument("--mixture", default=None,
+                    help="смесь экспонент вместо одного полураспада: "
+                         "«доля:часы,доля:часы» (напр. 0.75:4,0.25:336)")
+    ap.add_argument("--lev-tiers", default=None,
+                    help="полураспад по группам плеч: «макс_плечо:часы,...» "
+                         "по возрастанию (напр. 10:336,50:48,1e9:4)")
     ap.add_argument("--bucket-bps", type=float, default=0.0,
                     help="шаг ценового бакета в bps от цены, единый для всех ТФ "
                          "(0 = из ATR своего таймфрейма, прежнее поведение)")
@@ -155,10 +172,15 @@ def main() -> None:
                              daily_vol=args.daily_vol, oi_daily_usd=args.oi_daily)
                 if args.synthetic
                 else bars_from_lake(Path(args.lake), args.symbol, tf, n_bars))
-        lm, hist = build_map(bars, bar_s, half_life, bucket_bps=args.bucket_bps,
-                             close_out_fraction=args.close_out_fraction)
-        title = (f"{args.symbol} · {tf} · {bars.height} баров ({args.days} дней) · "
-                 f"полураспад {args.half_life_h:.0f} ч"
+        lm, hist = build_map(
+            bars, bar_s, half_life, bucket_bps=args.bucket_bps,
+            mixture=parse_mixture(args.mixture) if args.mixture else None,
+            lev_tiers=parse_mixture(args.lev_tiers) if args.lev_tiers else None,
+            close_out_fraction=args.close_out_fraction)
+        law = (f"тиры плеч {args.lev_tiers}" if args.lev_tiers else
+               f"смесь {args.mixture}" if args.mixture else
+               f"полураспад {args.half_life_h:.0f} ч")
+        title = (f"{args.symbol} · {tf} · {bars.height} баров ({args.days} дней) · {law}"
                  + (f" · бакет {args.bucket_bps:g} bps" if args.bucket_bps > 0 else "")
                  + ("" if args.lake else " · демо-ряд"))
         path = terminal_heat_overlay(bars, hist, name=f"map_{args.symbol.lower()}_{tf}",
@@ -179,7 +201,7 @@ def main() -> None:
     axes[1].set_title("Разрежённость карты")
     for ax in axes:
         ax.set_xlabel("таймфрейм")
-    fig.suptitle(f"{args.symbol}: один полураспад {args.half_life_h:.0f} ч на всех ТФ", y=1.02)
+    fig.suptitle(f"{args.symbol}: один закон затухания на всех ТФ", y=1.02)
     summary_path = save_fig(fig, f"map_{args.symbol.lower()}_summary", out)
     for tf, n, heat, occ, last, path in summary:
         print(f"{tf:>3} | {n:>6} баров | тепло {heat/1e6:8.2f} млн USD | бакетов {occ:>5} | "

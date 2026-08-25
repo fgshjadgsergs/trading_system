@@ -316,6 +316,11 @@ class LiqMap:
         idx = cells[j_max]
         side_heat[idx] = side_heat.get(idx, 0.0) + remaining
 
+    def remove_proportional(self, amount_usd: float) -> None:
+        """Публичная обёртка снятия: слоистая карта (`MixtureLiqMap`) считает
+        долю по общей массе всех слоёв и снимает её с каждого слоя сама."""
+        self._remove_proportional(amount_usd)
+
     def _remove_proportional(self, amount_usd: float) -> None:
         total = self.total_heat()
         if total <= 0.0:
