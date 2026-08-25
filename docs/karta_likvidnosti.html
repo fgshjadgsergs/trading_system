@@ -1,0 +1,591 @@
+<title>Карта ликвидности</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+:root{
+  --ground:#eef1f2; --surface:#ffffff; --surface-2:#e4eaeb;
+  --ink:#111a1d; --ink-2:#3f5359; --ink-3:#6b8087;
+  --rule:#ccd6d8; --rule-soft:#dfe6e7;
+  --accent:#0c7a6e; --accent-soft:rgba(12,122,110,.10);
+  --heat:#9a5a00; --heat-soft:rgba(154,90,0,.10);
+  --alarm:#a5301c; --alarm-soft:rgba(165,48,28,.10);
+  --panel:#0d1117; --panel-ink:#c9d7db; --panel-ink-2:#8397a0;
+  --measure:69ch;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0a0f13; --surface:#111a20; --surface-2:#17232a;
+    --ink:#dde8ea; --ink-2:#a6babf; --ink-3:#7b9096;
+    --rule:#233038; --rule-soft:#1b262c;
+    --accent:#3ad8b4; --accent-soft:rgba(58,216,180,.12);
+    --heat:#ffd24a; --heat-soft:rgba(255,210,74,.12);
+    --alarm:#ff8168; --alarm-soft:rgba(255,129,104,.12);
+    --panel:#070b0e; --panel-ink:#c9d7db; --panel-ink-2:#8397a0;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0a0f13; --surface:#111a20; --surface-2:#17232a;
+  --ink:#dde8ea; --ink-2:#a6babf; --ink-3:#7b9096;
+  --rule:#233038; --rule-soft:#1b262c;
+  --accent:#3ad8b4; --accent-soft:rgba(58,216,180,.12);
+  --heat:#ffd24a; --heat-soft:rgba(255,210,74,.12);
+  --alarm:#ff8168; --alarm-soft:rgba(255,129,104,.12);
+  --panel:#070b0e; --panel-ink:#c9d7db; --panel-ink-2:#8397a0;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:"Source Serif 4",Georgia,"Times New Roman",serif;
+  font-size:17px; line-height:1.68;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 clamp(1rem,4vw,2.5rem) 5rem}
+h1,h2,h3,.eyebrow,.chip,.toc,.formula,.legend dt,table,.tag,figcaption span{
+  font-family:"IBM Plex Sans Condensed","Helvetica Neue",Arial,sans-serif;
+}
+.formula,.legend dt,.mono,code,.toc a,.chip,.tag{
+  font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+.eyebrow{
+  font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--accent);font-weight:600;margin:0 0 .6rem
+}
+h1{
+  font-size:clamp(2.4rem,6vw,3.6rem);line-height:1.02;margin:0 0 .8rem;
+  font-weight:700;letter-spacing:-.015em;text-wrap:balance
+}
+h2{
+  font-size:clamp(1.45rem,3vw,1.85rem);line-height:1.15;margin:0;
+  font-weight:600;letter-spacing:-.01em;text-wrap:balance
+}
+h3{font-size:1.08rem;margin:2.2rem 0 .6rem;font-weight:600;letter-spacing:.005em}
+p{margin:0 0 1.05rem;max-width:var(--measure)}
+ul{max-width:var(--measure);padding-left:1.1rem;margin:0 0 1.05rem}
+li{margin-bottom:.45rem}
+strong{font-weight:600}
+a{color:var(--accent);text-decoration-thickness:1px;text-underline-offset:2px}
+a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:2px}
+code{
+  font-size:.88em;background:var(--accent-soft);color:var(--ink);
+  padding:.08em .35em;border-radius:2px
+}
+
+/* --- шапка --- */
+.hero{padding:clamp(2.5rem,7vw,4.5rem) 0 2rem}
+.hero p.lede{
+  font-size:clamp(1.08rem,2.2vw,1.28rem);color:var(--ink-2);
+  max-width:58ch;margin-bottom:1.8rem
+}
+.hero-map{display:block;width:100%;height:auto;border-radius:6px;margin:0 0 1.5rem}
+.hero-note{font-size:.85rem;color:var(--ink-3);max-width:var(--measure);margin:0 0 2rem}
+.chips{display:flex;flex-wrap:wrap;gap:.5rem;margin:0;padding:0;list-style:none;max-width:none}
+.chip{
+  font-size:.74rem;letter-spacing:.02em;padding:.32rem .6rem;border-radius:2px;
+  border:1px solid var(--rule);color:var(--ink-2);background:var(--surface);
+  display:inline-flex;gap:.45rem;align-items:baseline
+}
+.chip b{font-weight:600;color:var(--ink)}
+.chip--ok{border-color:var(--accent);background:var(--accent-soft)}
+.chip--ok b{color:var(--accent)}
+.chip--bad{border-color:var(--alarm);background:var(--alarm-soft)}
+.chip--bad b{color:var(--alarm)}
+
+/* --- сетка документа --- */
+.doc{display:grid;gap:3rem;align-items:start}
+@media(min-width:1040px){.doc{grid-template-columns:190px minmax(0,1fr)}}
+.toc{position:sticky;top:1.5rem;font-size:.78rem;line-height:1.5}
+.toc ol{list-style:none;margin:0;padding:0;display:grid;gap:.34rem;counter-reset:s}
+.toc li{counter-increment:s;margin:0}
+.toc a{color:var(--ink-3);text-decoration:none;display:grid;grid-template-columns:1.6rem 1fr;gap:.3rem}
+.toc a::before{content:counter(s);color:var(--accent);opacity:.65}
+.toc a:hover{color:var(--ink)}
+.toc-title{
+  font-size:.7rem;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);
+  margin:0 0 .9rem;font-family:"IBM Plex Sans Condensed",sans-serif;font-weight:600
+}
+
+section{padding-top:2.6rem;border-top:1px solid var(--rule-soft);margin-top:2.6rem}
+section:first-of-type{border-top:0;margin-top:0;padding-top:0}
+.sec-head{display:flex;gap:.9rem;align-items:baseline;margin:0 0 1.3rem}
+.sec-num{
+  font-family:"IBM Plex Mono",monospace;font-size:.82rem;color:var(--accent);
+  font-weight:500;padding-top:.25rem
+}
+
+/* --- формулы и расшифровки --- */
+.formula{
+  background:var(--surface);border:1px solid var(--rule-soft);border-left:3px solid var(--accent);
+  border-radius:0 3px 3px 0;padding:1rem 1.1rem;margin:0 0 .9rem;overflow-x:auto;
+  font-size:.9rem;line-height:1.85;color:var(--ink);white-space:pre;tab-size:2
+}
+.formula b{color:var(--accent);font-weight:500}
+.legend{
+  display:grid;grid-template-columns:max-content minmax(0,1fr);gap:.35rem 1rem;
+  margin:0 0 1.6rem;max-width:var(--measure);align-items:baseline
+}
+.legend dt{font-size:.88rem;color:var(--heat);font-weight:500}
+.legend dd{margin:0;color:var(--ink-2);font-size:.96rem}
+.legend dd em{font-style:normal;color:var(--ink-3);font-size:.88em}
+
+/* --- таблицы --- */
+.scroll{overflow-x:auto;margin:0 0 1.6rem;max-width:100%}
+table{border-collapse:collapse;font-size:.88rem;width:100%;min-width:420px;
+  font-variant-numeric:tabular-nums}
+th{
+  text-align:left;font-weight:600;color:var(--ink-3);font-size:.72rem;
+  letter-spacing:.09em;text-transform:uppercase;padding:.4rem .8rem .4rem 0;
+  border-bottom:1px solid var(--rule);white-space:nowrap
+}
+td{padding:.46rem .8rem .46rem 0;border-bottom:1px solid var(--rule-soft);
+  color:var(--ink-2);vertical-align:top}
+td:first-child{color:var(--ink);white-space:nowrap}
+td.num{font-family:"IBM Plex Mono",monospace;font-size:.84rem}
+tr:last-child td{border-bottom:0}
+.win{color:var(--accent);font-weight:600}
+
+/* --- врезки --- */
+.note{
+  border-left:2px solid var(--heat);background:var(--heat-soft);
+  padding:.85rem 1.1rem;margin:0 0 1.5rem;max-width:var(--measure);
+  font-size:.95rem;color:var(--ink-2)
+}
+.note b{color:var(--ink)}
+.tag{
+  font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);
+  border:1px solid var(--accent);border-radius:2px;padding:.1rem .35rem;
+  vertical-align:.15em;margin-left:.5rem;font-weight:500
+}
+.tag--opt{color:var(--ink-3);border-color:var(--rule)}
+
+/* --- фигуры --- */
+figure{margin:1.8rem 0;padding:0}
+figure svg{display:block;width:100%;height:auto;color:var(--ink-3)}
+figcaption{font-size:.87rem;color:var(--ink-3);margin-top:.7rem;max-width:var(--measure)}
+figcaption span{color:var(--ink-2);font-weight:600}
+.dg-face{fill:var(--surface-2)}
+.dg-line{stroke:currentColor;fill:none;stroke-width:1.2}
+.dg-txt{fill:var(--ink-2);font-family:"IBM Plex Mono",monospace;font-size:12px}
+.dg-txt-s{fill:var(--ink-3);font-family:"IBM Plex Mono",monospace;font-size:11px}
+.dg-acc{fill:var(--accent)}
+.dg-acc-s{stroke:var(--accent);fill:none;stroke-width:1.4}
+.dg-heat{fill:var(--heat)}
+.dg-band{fill:var(--accent);opacity:.13}
+.dg-dim{fill:var(--ink-3);opacity:.35}
+
+/* --- статус --- */
+.status{display:grid;gap:1.4rem;margin:0 0 1.4rem}
+@media(min-width:760px){.status{grid-template-columns:1fr 1fr}}
+.status-card{
+  border:1px solid var(--rule);border-radius:3px;padding:1.1rem 1.2rem;background:var(--surface)
+}
+.status-card h3{margin:0 0 .8rem;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase}
+.status-card ul{margin:0;font-size:.94rem;color:var(--ink-2);max-width:none}
+.status-card--ok{border-left:3px solid var(--accent)}
+.status-card--ok h3{color:var(--accent)}
+.status-card--bad{border-left:3px solid var(--alarm)}
+.status-card--bad h3{color:var(--alarm)}
+
+.pre-cmd{
+  background:var(--panel);color:var(--panel-ink);border-radius:4px;padding:1rem 1.1rem;
+  overflow-x:auto;font-family:"IBM Plex Mono",monospace;font-size:.82rem;line-height:1.9;
+  margin:0 0 1.2rem;white-space:pre
+}
+.pre-cmd i{color:var(--panel-ink-2);font-style:normal}
+footer{
+  margin-top:4rem;padding-top:1.6rem;border-top:1px solid var(--rule-soft);
+  font-size:.85rem;color:var(--ink-3);max-width:var(--measure)
+}
+@media(prefers-reduced-motion:no-preference){
+  a{transition:color .15s ease}
+}
+</style>
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">Модель · спецификация</p>
+  <h1>Карта ликвидности</h1>
+  <p class="lede">Оценка того, сколько долларов чужих позиций будет принудительно закрыто на каждом уровне цены. Не индикатор — счёт денег.</p>
+  <svg class="hero-map" viewBox="0 0 760 210" role="img" aria-label="Схематичная карта ликвидности: горизонтальные полосы тепла разной яркости, поверх них свечи цены"><rect x="0" y="0" width="760" height="210" rx="6" fill="#0d1117"/><rect x="85" y="8.0" width="243" height="4.4" rx="1" fill="#0f7f74" opacity="0.28"/><rect x="70" y="15.6" width="249" height="4.4" rx="1" fill="#0f7f74" opacity="0.28"/><rect x="78" y="23.2" width="246" height="4.4" rx="1" fill="#0f7f74" opacity="0.28"/><rect x="65" y="30.8" width="251" height="4.4" rx="1" fill="#0f7f74" opacity="0.29"/><rect x="84" y="38.4" width="271" height="4.4" rx="1" fill="#0f7f74" opacity="0.33"/><rect x="41" y="46.0" width="285" height="4.4" rx="1" fill="#0f7f74" opacity="0.32"/><rect x="71" y="53.6" width="287" height="4.4" rx="1" fill="#0f7f74" opacity="0.35"/><rect x="20" y="61.2" width="383" height="4.4" rx="1" fill="#0f7f74" opacity="0.46"/><rect x="63" y="68.8" width="420" height="4.4" rx="1" fill="#2fd6b0" opacity="0.56"/><rect x="41" y="76.4" width="432" height="4.4" rx="1" fill="#2fd6b0" opacity="0.56"/><rect x="18" y="84.0" width="403" height="4.4" rx="1" fill="#0f7f74" opacity="0.49"/><rect x="19" y="91.6" width="499" height="4.4" rx="1" fill="#2fd6b0" opacity="0.64"/><rect x="21" y="99.2" width="462" height="4.4" rx="1" fill="#2fd6b0" opacity="0.59"/><rect x="19" y="106.8" width="454" height="4.4" rx="1" fill="#2fd6b0" opacity="0.57"/><rect x="24" y="114.4" width="525" height="4.4" rx="1" fill="#2fd6b0" opacity="0.69"/><rect x="29" y="122.0" width="502" height="4.4" rx="1" fill="#2fd6b0" opacity="0.65"/><rect x="35" y="129.6" width="458" height="4.4" rx="1" fill="#2fd6b0" opacity="0.59"/><rect x="28" y="137.2" width="424" height="4.4" rx="1" fill="#0f7f74" opacity="0.53"/><rect x="62" y="144.8" width="435" height="4.4" rx="1" fill="#2fd6b0" opacity="0.59"/><rect x="56" y="152.4" width="386" height="4.4" rx="1" fill="#0f7f74" opacity="0.5"/><rect x="32" y="160.0" width="327" height="4.4" rx="1" fill="#0f7f74" opacity="0.38"/><rect x="23" y="167.6" width="309" height="4.4" rx="1" fill="#0f7f74" opacity="0.35"/><rect x="50" y="175.2" width="298" height="4.4" rx="1" fill="#0f7f74" opacity="0.35"/><rect x="53" y="182.8" width="277" height="4.4" rx="1" fill="#0f7f74" opacity="0.32"/><rect x="102" y="190.4" width="241" height="4.4" rx="1" fill="#0f7f74" opacity="0.29"/><rect x="41" y="198.0" width="260" height="4.4" rx="1" fill="#0f7f74" opacity="0.28"/><line x1="18" y1="85.6" x2="742" y2="85.6" stroke="#c5d0d9" stroke-width="1" stroke-dasharray="5 4" opacity="0.75"/><line x1="34" y1="110.1" x2="34" y2="116.9" stroke="#ef5350" stroke-width="1.2"/><rect x="30.6" y="108.0" width="6.8" height="7.4" rx="1" fill="#ef5350"/><line x1="49" y1="112.9" x2="49" y2="119.9" stroke="#26a69a" stroke-width="1.2"/><rect x="45.6" y="113.5" width="6.8" height="2.0" rx="1" fill="#26a69a"/><line x1="64" y1="114.7" x2="64" y2="116.1" stroke="#ef5350" stroke-width="1.2"/><rect x="60.6" y="113.5" width="6.8" height="5.0" rx="1" fill="#ef5350"/><line x1="79" y1="109.8" x2="79" y2="122.8" stroke="#26a69a" stroke-width="1.2"/><rect x="75.6" y="115.5" width="6.8" height="3.0" rx="1" fill="#26a69a"/><line x1="94" y1="111.8" x2="94" y2="111.4" stroke="#26a69a" stroke-width="1.2"/><rect x="90.6" y="108.7" width="6.8" height="6.9" rx="1" fill="#26a69a"/><line x1="109" y1="101.1" x2="109" y2="104.0" stroke="#26a69a" stroke-width="1.2"/><rect x="105.6" y="100.7" width="6.8" height="7.9" rx="1" fill="#26a69a"/><line x1="124" y1="96.7" x2="124" y2="104.1" stroke="#ef5350" stroke-width="1.2"/><rect x="120.6" y="100.7" width="6.8" height="2.0" rx="1" fill="#ef5350"/><line x1="139" y1="103.1" x2="139" y2="108.3" stroke="#ef5350" stroke-width="1.2"/><rect x="135.6" y="101.8" width="6.8" height="4.2" rx="1" fill="#ef5350"/><line x1="154" y1="101.0" x2="154" y2="102.6" stroke="#26a69a" stroke-width="1.2"/><rect x="150.6" y="99.1" width="6.8" height="6.9" rx="1" fill="#26a69a"/><line x1="169" y1="90.3" x2="169" y2="102.6" stroke="#26a69a" stroke-width="1.2"/><rect x="165.6" y="94.9" width="6.8" height="4.1" rx="1" fill="#26a69a"/><line x1="184" y1="86.7" x2="184" y2="94.9" stroke="#26a69a" stroke-width="1.2"/><rect x="180.6" y="91.4" width="6.8" height="3.5" rx="1" fill="#26a69a"/><line x1="199" y1="83.4" x2="199" y2="96.0" stroke="#26a69a" stroke-width="1.2"/><rect x="195.6" y="89.5" width="6.8" height="2.0" rx="1" fill="#26a69a"/><line x1="214" y1="80.6" x2="214" y2="85.8" stroke="#26a69a" stroke-width="1.2"/><rect x="210.6" y="82.3" width="6.8" height="7.2" rx="1" fill="#26a69a"/><line x1="229" y1="74.9" x2="229" y2="82.3" stroke="#26a69a" stroke-width="1.2"/><rect x="225.6" y="78.0" width="6.8" height="4.4" rx="1" fill="#26a69a"/><line x1="244" y1="75.4" x2="244" y2="76.9" stroke="#26a69a" stroke-width="1.2"/><rect x="240.6" y="74.3" width="6.8" height="3.7" rx="1" fill="#26a69a"/><line x1="259" y1="72.1" x2="259" y2="80.5" stroke="#ef5350" stroke-width="1.2"/><rect x="255.6" y="74.3" width="6.8" height="2.0" rx="1" fill="#ef5350"/><line x1="274" y1="70.6" x2="274" y2="82.2" stroke="#26a69a" stroke-width="1.2"/><rect x="270.6" y="73.5" width="6.8" height="2.3" rx="1" fill="#26a69a"/><line x1="289" y1="67.5" x2="289" y2="81.2" stroke="#26a69a" stroke-width="1.2"/><rect x="285.6" y="73.2" width="6.8" height="2.0" rx="1" fill="#26a69a"/><line x1="304" y1="70.1" x2="304" y2="75.8" stroke="#26a69a" stroke-width="1.2"/><rect x="300.6" y="67.5" width="6.8" height="5.7" rx="1" fill="#26a69a"/><line x1="319" y1="69.4" x2="319" y2="70.8" stroke="#ef5350" stroke-width="1.2"/><rect x="315.6" y="67.5" width="6.8" height="5.7" rx="1" fill="#ef5350"/><line x1="334" y1="68.9" x2="334" y2="76.6" stroke="#ef5350" stroke-width="1.2"/><rect x="330.6" y="73.2" width="6.8" height="4.3" rx="1" fill="#ef5350"/><line x1="349" y1="77.4" x2="349" y2="83.7" stroke="#ef5350" stroke-width="1.2"/><rect x="345.6" y="77.5" width="6.8" height="8.1" rx="1" fill="#ef5350"/></svg>
+  <p class="hero-note">Так карта выглядит на графике: тёмный коридор вдоль цены — уровни, которые цена уже сняла; яркие полосы выше и ниже — доллары, которые ещё стоят.</p>
+  <ul class="chips">
+    <li class="chip chip--ok"><b>840</b> тестов зелёные</li>
+    <li class="chip chip--ok"><b>1e-12</b> точность баланса массы</li>
+    <li class="chip chip--ok"><b>1.000</b> совпадение карты между ТФ</li>
+    <li class="chip chip--bad"><b>Gate A</b> не пройден — нет живых ликвидаций</li>
+  </ul>
+</header>
+
+<div class="doc">
+
+<nav class="toc" aria-label="Содержание">
+  <p class="toc-title">Разделы</p>
+  <ol>
+    <li><a href="#s1">Что это такое</a></li>
+    <li><a href="#s2">Что на входе</a></li>
+    <li><a href="#s3">Ценовая сетка</a></li>
+    <li><a href="#s4">Откуда берётся тепло</a></li>
+    <li><a href="#s5">Цена ликвидации</a></li>
+    <li><a href="#s6">Куда кладётся тепло</a></li>
+    <li><a href="#s7">Что снимает тепло</a></li>
+    <li><a href="#s8">Один бар</a></li>
+    <li><a href="#s9">Баланс массы</a></li>
+    <li><a href="#s10">Таймфреймы</a></li>
+    <li><a href="#s11">Как читать</a></li>
+    <li><a href="#s12">Как проверяется</a></li>
+    <li><a href="#s13">Все параметры</a></li>
+    <li><a href="#s14">Что сделано</a></li>
+    <li><a href="#s15">Запуск</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="s1">
+  <div class="sec-head"><span class="sec-num">§1</span><h2>Что это такое одной фразой</h2></div>
+  <p>Карта ликвидности — это оценка <strong>сколько долларов чужих позиций будет принудительно закрыто на каждом уровне цены</strong>. Не «уровень поддержки», не индикатор: это счёт денег. Если на $63.2 стоит $2 млн лонговых ликвидаций, значит при доходе цены до $63.2 биржа вынужденно продаст примерно на эту сумму.</p>
+  <p>Технически — словарь «ценовая корзина → тепло в USD», который обновляется на каждом баре: что-то добавляется (открылись новые позиции), что-то снимается (цена дошла и всё ликвидировала), что-то тускнеет со временем (позиции закрылись сами).</p>
+  <p>Ключевое слово — <strong>тепло</strong> (heat). Это доллары, а не абстрактные баллы.</p>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="sec-num">§2</span><h2>Что подаётся на вход</h2></div>
+  <div class="scroll"><table>
+    <thead><tr><th>Данные</th><th>Откуда</th><th>Зачем</th></tr></thead>
+    <tbody>
+      <tr><td>Свечи OHLC</td><td>klines с биржи</td><td>цена входа новых позиций и путь, который цена прошла</td></tr>
+      <tr><td>Открытый интерес</td><td><code>/fapi/v1/openInterest</code>, опрос раз в 7 с</td><td>прирост OI = сколько денег вошло в рынок</td></tr>
+      <tr><td>Доли сторон</td><td>ratio-потоки биржи</td><td>как разделить приток между лонгами и шортами</td></tr>
+      <tr><td>Тиры маржи</td><td><code>/fapi/v1/leverageBracket</code></td><td>точная ставка поддерживающей маржи для формулы</td></tr>
+      <tr><td>ATR</td><td>считается из свечей</td><td>масштаб ценовой корзины</td></tr>
+      <tr><td>Реальные ликвидации</td><td>поток <code>forceOrder</code></td><td><strong>только для проверки</strong>, в карту не входят</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note"><b>Последняя строка — принципиальная.</b> Карта строится без знания реальных ликвидаций. Реальные ликвидации нужны только чтобы проверить, угадала карта или нет. Иначе проверка была бы подгонкой.</div>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="sec-num">§3</span><h2>Ценовая сетка</h2></div>
+  <p>Цена непрерывна, а карта хранит конечное число ячеек. Ось цены режется на корзины одинаковой ширины.</p>
+  <div class="formula">i     = floor(P / S)        <b>номер корзины для цены P</b>
+lo(i) = i · S              <b>нижняя граница (входит)</b>
+hi(i) = (i+1) · S          <b>верхняя граница (НЕ входит)</b>
+центр = (i + 0.5) · S</div>
+  <dl class="legend">
+    <dt>P</dt><dd>цена в USDT</dd>
+    <dt>S</dt><dd>ширина корзины в USDT</dd>
+    <dt>i</dt><dd>целый номер корзины <em>— может быть отрицательным для дешёвых монет</em></dd>
+  </dl>
+  <p>Границы полуоткрытые: <code>lo ≤ P &lt; hi</code>. Цена ровно на границе принадлежит верхней корзине, и только ей — иначе одна цена оказалась бы в двух корзинах сразу.</p>
+  <div class="formula">S = 0.1 · ATR              <b>привязка к волатильности инструмента</b>
+S = P · bps / 10 000       <b>привязка к цене (25 bps = 0.25 % цены)</b></div>
+  <div class="note"><b>Ширину нельзя брать из ATR того таймфрейма, на который смотришь.</b> ATR минутного бара примерно в 40 раз меньше часового, и минутная карта вырождается в тысячи волосяных уровней. Сетка — свойство инструмента.</div>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="sec-num">§4</span><h2>Откуда берётся новое тепло</h2></div>
+
+  <h3>Сколько денег вошло</h3>
+  <div class="formula">ΔOI = OI(конец бара) − OI(начало бара)      <b>в USD</b></div>
+  <p><code>ΔOI &gt; 0</code> — открылись новые позиции, и они где-то будут ликвидированы. <code>ΔOI &lt; 0</code> — позиции закрылись (см. §7.2).</p>
+
+  <h3>Как разделить между лонгами и шортами</h3>
+  <div class="formula">LS = 0.4 · global_ls + 0.3 · top_ls + 0.3 · taker_ls
+LS = clip(LS, 0.1, 0.9)
+
+в лонги уходит   ΔOI · LS
+в шорты уходит   ΔOI · (1 − LS)</div>
+  <dl class="legend">
+    <dt>LS</dt><dd>доля притока, ушедшая в лонги</dd>
+    <dt>global_ls</dt><dd>доля лонгов среди всех счетов биржи</dd>
+    <dt>top_ls</dt><dd>доля лонгов среди крупных счетов, по позициям</dd>
+    <dt>taker_ls</dt><dd>доля агрессивных покупок в потоке сделок</dd>
+  </dl>
+  <p>Коэффициенты 0.4 / 0.3 / 0.3 — стартовые, они калибруются. Обрезание в [0.1, 0.9] не даёт одной стороне исчезнуть из-за одного кривого замера. Доли берутся <strong>строго назад по времени</strong>: бар видит только те замеры, что опубликованы до его закрытия — иначе карта подглядывает в будущее.</p>
+
+  <h3>Как разделить по плечам</h3>
+  <p>Никто не знает, кто с каким плечом зашёл. Приток делится по сетке плеч с весами.</p>
+  <div class="formula">сетка плеч   L ∈ {3, 5, 10, 20, 25, 30, 40, 50, 60, 75, 100, 125}
+веса         w = (w₁ … w₁₂),   wₗ ≥ 0,   Σ wₗ = 1
+
+amount = ΔOI · (доля стороны) · wₗ     <b>деньги одного куска</b></div>
+  <dl class="legend">
+    <dt>L</dt><dd>плечо</dd>
+    <dt>wₗ</dt><dd>доля притока, зашедшая с плечом L</dd>
+    <dt>amount</dt><dd>доллары этого куска — они и станут теплом</dd>
+  </dl>
+  <div class="note"><b>Веса w — главный калибруемый объект модели.</b> Их подбирают так, чтобы карта лучше всего совпадала с реальными ликвидациями (§12).</div>
+</section>
+
+<section id="s5">
+  <div class="sec-head"><span class="sec-num">§5</span><h2>Формула цены ликвидации</h2></div>
+  <p>Ядро модели: она превращает «$100k зашли на плече 25x по цене $3.40» в «эти $100k сгорят на цене $3.27».</p>
+
+  <h3>Базовая формула — Binance USDT-M, изолированная маржа</h3>
+  <div class="formula">лонг:   P_liq = ( E · (1 − 1/L) − cum/q ) / (1 − MMR)
+шорт:   P_liq = ( E · (1 + 1/L) + cum/q ) / (1 + MMR)</div>
+  <dl class="legend">
+    <dt>P_liq</dt><dd>цена ликвидации — то, что ищем <em>— USDT</em></dd>
+    <dt>E</dt><dd>цена входа в позицию, берём закрытие бара <em>— USDT</em></dd>
+    <dt>L</dt><dd>плечо <em>— раз</em></dd>
+    <dt>q</dt><dd>размер позиции <em>— монеты</em></dd>
+    <dt>MMR</dt><dd>ставка поддерживающей маржи <em>— доля, 0.005 = 0.5 %</em></dd>
+    <dt>cum</dt><dd>вычет поддерживающей маржи для тира <em>— USD</em></dd>
+  </dl>
+  <p>Смысл <code>E · (1 − 1/L)</code>: на плече L вы вносите 1/L от стоимости позиции; когда цена упала на эту долю, ваши деньги кончились. Деление на <code>(1 − MMR)</code> — потому что биржа закрывает не в ноль, а когда осталось MMR от нотионала. <code>cum</code> — поправка биржи, чтобы ставка не прыгала скачком на границе тиров.</p>
+  <p>Для лонга результат обрезается снизу нулём: позиция на плече 1x не ликвидируется вовсе, карта для неё ничего не размещает — такие деньги идут отдельной строкой <code>dropped</code>.</p>
+  <div class="note">Формула совпадает с калькулятором биржи <code>(WB + cum ∓ q·E) / (q·(MMR ∓ 1))</code> с точностью 1e-12 на всех тестовых случаях.</div>
+
+  <h3>Тиры маржи</h3>
+  <p>MMR не постоянна: чем больше позиция, тем выше ставка.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Нотионал до, USD</th><th>MMR</th><th>cum, USD</th></tr></thead>
+    <tbody>
+      <tr><td class="num">50 000</td><td class="num">0.4 %</td><td class="num">0</td></tr>
+      <tr><td class="num">250 000</td><td class="num">0.5 %</td><td class="num">50</td></tr>
+      <tr><td class="num">1 000 000</td><td class="num">1.0 %</td><td class="num">1 300</td></tr>
+      <tr><td class="num">10 000 000</td><td class="num">2.5 %</td><td class="num">16 300</td></tr>
+      <tr><td class="num">20 000 000</td><td class="num">5.0 %</td><td class="num">266 300</td></tr>
+      <tr><td class="num">…</td><td class="num">…</td><td class="num">…</td></tr>
+    </tbody>
+  </table></div>
+  <p>Это справочная таблица BTC-типа; в бою она тянется по каждому символу с биржи.</p>
+  <p>Тонкость: биржа берёт тир по нотионалу <strong>на цене ликвидации</strong>, а не на цене входа. Поэтому формула решается самосогласованно — перебираем тиры и берём тот, у которого</p>
+  <div class="formula">предыдущий_кап &lt; P_liq · q ≤ кап_тира</div>
+  <p>Без этого тепло уезжает не туда: для 6 BTC на 2x разница между «тир по входу» и «тир по цене ликвидации» — сотни долларов на уровне.</p>
+
+  <h3>Ограничение на размер счёта</h3>
+  <p>ΔOI за бар — это деньги <strong>многих</strong> счетов, а тир выбирается по размеру <strong>одного</strong>. Если подставить весь агрегат, крупный приток попадает в тир с <code>MMR ≥ 1/L</code> — то есть в позицию, которая была бы ликвидирована в момент открытия. Биржа такую просто не откроет.</p>
+  <div class="formula">лонг:   q_max = ( cap · (1 − mmr) + cum ) / ( E · (1 − 1/L) )
+шорт:   q_max = ( cap · (1 + mmr) − cum ) / ( E · (1 + 1/L) )
+        q = min(q, q_max)</div>
+  <dl class="legend">
+    <dt>cap</dt><dd>верхняя граница нотионала последнего тира, допускающего плечо L</dd>
+    <dt>mmr, cum</dt><dd>параметры этого тира</dd>
+    <dt>q_max</dt><dd>самый большой одиночный счёт, ещё жизнеспособный на этом плече</dd>
+  </dl>
+  <p>Тир допускает плечо, если <code>L ≤ max_leverage</code> тира — или, если биржа не дала капа, по консервативному эквиваленту <code>mmr &lt; 1/L</code>.</p>
+  <div class="note"><b>Замер:</b> доля кусков, попадавших на неправильную сторону от цены, упала с 16.9 % до 0 %.</div>
+
+  <h3>Опция: типовой счёт <span class="tag tag--opt">по желанию</span></h3>
+  <p>Вместо агрегата можно объявить, что типичный счёт имеет размер <code>typical_account_usd</code>, и выбирать тир по нему. Тогда цена ликвидации не зависит от того, сколько денег пришло за бар — что честнее физически: тир есть свойство счёта, а не потока.</p>
+</section>
+
+<section id="s6">
+  <div class="sec-head"><span class="sec-num">§6</span><h2>Куда именно кладётся тепло</h2></div>
+  <h3>Просто — по умолчанию</h3>
+  <div class="formula">heat[ сторона ][ index(P_liq) ] += amount</div>
+  <h3>С размытием <span class="tag tag--opt">по желанию</span></h3>
+  <p>В реальности позиции с одним плечом входили не по одной цене, а по разбросу цен. Поэтому сумму можно размазать гауссовым ядром вокруг P_liq.</p>
+  <div class="formula">d       = |P − P_liq| / P · 10 000      <b>расстояние до уровня, bps</b>
+σ_price = (σ₀ + σ₁ · d) · P / 10 000    <b>ширина ядра, USDT</b>
+σ_b     = σ_price / S                   <b>ширина ядра, в корзинах</b>
+
+вес ячейки на смещении k  ∝  exp( −0.5 · (k / σ_b)² )</div>
+  <dl class="legend">
+    <dt>σ₀</dt><dd>базовая ширина размытия, bps от цены</dd>
+    <dt>σ₁</dt><dd>насколько ядро расширяется с удалением уровня от цены <em>— bps на bp</em></dd>
+    <dt>k</dt><dd>смещение ячейки от центральной, в корзинах</dd>
+  </dl>
+  <p>Ядро обрезается на ±3σ и не шире 41 корзины. Ячейки на неправильной стороне (лонговое тепло на уровне цены или выше, шортовое — на уровне или ниже) выбрасываются, остальные веса перенормируются. Масса сохраняется точно: ячейка с наибольшим весом забирает остаток от последовательного деления.</p>
+</section>
+
+<section id="s7">
+  <div class="sec-head"><span class="sec-num">§7</span><h2>Что снимает тепло</h2></div>
+  <p>Механизмов три, и они принципиально разные: один локальный, два глобальных. Путать их — главный источник недоумения при взгляде на график.</p>
+
+  <figure>
+    <svg viewBox="0 0 700 300" role="img" aria-label="Проход цены убирает только корзины внутри диапазона свечи, затухание уменьшает все корзины сразу"><defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs><rect x="20" y="115" width="660" height="61" rx="2" class="dg-band"/><text x="24" y="109" class="dg-txt-s">диапазон свечи [low, high]</text><text x="58" y="42" class="dg-txt">до бара</text><rect x="58" y="60" width="46" height="11" rx="1.5" class="dg-acc" opacity="1"/><rect x="58" y="80" width="62" height="11" rx="1.5" class="dg-acc" opacity="1"/><rect x="58" y="100" width="88" height="11" rx="1.5" class="dg-acc" opacity="1"/><rect x="58" y="120" width="120" height="11" rx="1.5" class="dg-heat" opacity="1"/><rect x="58" y="140" width="104" height="11" rx="1.5" class="dg-heat" opacity="1"/><rect x="58" y="160" width="130" height="11" rx="1.5" class="dg-heat" opacity="1"/><rect x="58" y="180" width="96" height="11" rx="1.5" class="dg-acc" opacity="1"/><rect x="58" y="200" width="70" height="11" rx="1.5" class="dg-acc" opacity="1"/><rect x="58" y="220" width="54" height="11" rx="1.5" class="dg-acc" opacity="1"/><rect x="58" y="240" width="38" height="11" rx="1.5" class="dg-acc" opacity="1"/><text x="278" y="42" class="dg-txt">после прохода цены</text><rect x="278" y="60" width="46" height="11" rx="1.5" class="dg-acc" opacity="1"/><rect x="278" y="80" width="62" height="11" rx="1.5" class="dg-acc" opacity="1"/><rect x="278" y="100" width="88" height="11" rx="1.5" class="dg-acc" opacity="1"/><line x1="278" y1="125.5" x2="294" y2="125.5" class="dg-line" stroke-dasharray="2 3" opacity=".5"/><line x1="278" y1="145.5" x2="294" y2="145.5" class="dg-line" stroke-dasharray="2 3" opacity=".5"/><line x1="278" y1="165.5" x2="294" y2="165.5" class="dg-line" stroke-dasharray="2 3" opacity=".5"/><rect x="278" y="180" width="96" height="11" rx="1.5" class="dg-acc" opacity="1"/><rect x="278" y="200" width="70" height="11" rx="1.5" class="dg-acc" opacity="1"/><rect x="278" y="220" width="54" height="11" rx="1.5" class="dg-acc" opacity="1"/><rect x="278" y="240" width="38" height="11" rx="1.5" class="dg-acc" opacity="1"/><text x="498" y="42" class="dg-txt">после затухания</text><rect x="498" y="60" width="23" height="11" rx="1.5" class="dg-acc" opacity=".55"/><rect x="498" y="80" width="31" height="11" rx="1.5" class="dg-acc" opacity=".55"/><rect x="498" y="100" width="44" height="11" rx="1.5" class="dg-acc" opacity=".55"/><line x1="498" y1="125.5" x2="514" y2="125.5" class="dg-line" stroke-dasharray="2 3" opacity=".5"/><line x1="498" y1="145.5" x2="514" y2="145.5" class="dg-line" stroke-dasharray="2 3" opacity=".5"/><line x1="498" y1="165.5" x2="514" y2="165.5" class="dg-line" stroke-dasharray="2 3" opacity=".5"/><rect x="498" y="180" width="48" height="11" rx="1.5" class="dg-acc" opacity=".55"/><rect x="498" y="200" width="35" height="11" rx="1.5" class="dg-acc" opacity=".55"/><rect x="498" y="220" width="27" height="11" rx="1.5" class="dg-acc" opacity=".55"/><rect x="498" y="240" width="19" height="11" rx="1.5" class="dg-acc" opacity=".55"/><line x1="232" y1="160" x2="266" y2="160" class="dg-line" marker-end="url(#ar)"/><line x1="452" y1="160" x2="486" y2="160" class="dg-line" marker-end="url(#ar)"/><text x="249" y="152" class="dg-txt-s">consume</text><text x="470" y="152" class="dg-txt-s">decay</text><text x="58" y="284" class="dg-txt-s">снято 3 корзины из 3 внутри диапазона, вне — ни одной</text><text x="498" y="284" class="dg-txt-s">−50 % у каждой оставшейся</text></svg>
+    <figcaption><span>Проход цены локален, затухание — нет.</span> Свеча убирает только корзины внутри своего диапазона и не трогает остальные; затухание уменьшает каждую корзину, независимо от того, ходила к ней цена.</figcaption>
+  </figure>
+
+  <h3>7.1 Цена дошла — уровень сработал</h3>
+  <p>За бар цена прошла отрезок <code>[low, high]</code>. Всё тепло на этом отрезке реализовалось: лонги ликвидированы по дороге вниз, шорты — по дороге вверх. Корзина снимается тогда и только тогда, когда</p>
+  <div class="formula">hi(i) &gt; low   И   lo(i) ≤ high</div>
+  <p>Строгое <code>&gt;</code> слева — потому что корзина, кончающаяся ровно на <code>low</code>, ценой не задета. Опционально края снимаются частично, пропорционально пройденной доле:</p>
+  <div class="formula">frac = ( min(hi(i), high) − max(lo(i), low) ) / ( hi(i) − lo(i) )
+снимается h · frac</div>
+
+  <h3>7.2 Позиции закрылись сами</h3>
+  <p>Отрицательный прирост OI — добровольные закрытия. Такое тепло снимается со всей карты пропорционально:</p>
+  <div class="formula">factor = min( |ΔOI| · c / H , 1 )
+каждая корзина:  h ← h · (1 − factor)</div>
+  <dl class="legend">
+    <dt>H</dt><dd>суммарное тепло карты сейчас, USD</dd>
+    <dt>c</dt><dd>доля закрытий, которая реально несла тепло <em>— close_out_fraction</em></dd>
+    <dt>factor</dt><dd>какая доля массы карты списывается</dd>
+  </dl>
+  <div class="note"><b>Зачем нужен c.</b> Не всякая закрытая позиция стояла у ликвидации — многие закрылись далеко от неё или уже были съедены ценой. При <code>c = 1</code> на закрытия уходит 68–76 % всей массы карты, и уровни не доживают до второго дня. При <code>c = 0.5</code> медианная жизнь уровня выросла с 27 до 56 часов.</div>
+
+  <h3>7.3 Время</h3>
+  <p>Старые позиции постепенно перестают быть правдой: их закрыли, перевернули, перенесли. Каждый шаг всё тепло умножается на коэффициент:</p>
+  <div class="formula">keep = 0.5 ^ ( Δt / T½ )
+h ← h · keep</div>
+  <dl class="legend">
+    <dt>Δt</dt><dd>сколько времени прошло, секунды</dd>
+    <dt>T½</dt><dd>период полураспада: за это время тепло уменьшается вдвое</dd>
+    <dt>keep</dt><dd>доля, которая осталась</dd>
+  </dl>
+  <div class="note"><b>Это глобальный механизм.</b> На дневном баре с <code>T½ = 24 ч</code> один бар — ровно один полураспад, то есть минус 50 % у каждого уровня за свечу, ходила к нему цена или нет. Отсюда ощущение «затухают сразу все».</div>
+
+  <h3>7.4 Смесь полураспадов <span class="tag tag--opt">по желанию</span></h3>
+  <p>Одна экспонента означает, что шанс позиции исчезнуть в следующий час не зависит от того, сколько она уже прожила. У рынка это не так: импульсная толпа на 100x живёт часы, крупная позиция на 3x — недели. Поэтому тепло можно разложить на K слоёв со своими полураспадами.</p>
+  <div class="formula">S(t) = Σ wₖ · 2^( −t / Tₖ )     <b>доля тепла, дожившая до возраста t</b>
+
+приток делится:  ΔOI⁺ · wₖ в слой k
+снятие ценой:    одинаково для всех слоёв — геометрия общая
+закрытия:        одна и та же ДОЛЯ массы с каждого слоя</div>
+  <dl class="legend">
+    <dt>wₖ</dt><dd>доля притока, попадающая в слой k <em>— Σwₖ = 1</em></dd>
+    <dt>Tₖ</dt><dd>полураспад слоя k</dd>
+    <dt>S(t)</dt><dd>функция выживания: сколько осталось от исходной массы к возрасту t</dd>
+  </dl>
+  <p>Свойство смеси: <strong>эффективный полураспад растёт с возрастом тепла</strong>. Молодое гаснет быстро, дожившее живёт долго. Замер на демо-ряде: смесь <code>0.75·4ч + 0.25·14д</code> даёт контраст картинки 0.603 при памяти 0.135, тогда как одна экспонента с той же памятью — контраст всего 0.504. Одной экспонентой обе величины сразу не получить.</p>
+  <p>Каждый слой — обычная карта со своей арифметикой, поэтому все проверки (баланс массы, точность снятия) работают послойно.</p>
+</section>
+
+<section id="s8">
+  <div class="sec-head"><span class="sec-num">§8</span><h2>Что происходит на одном баре</h2></div>
+  <figure>
+    <svg viewBox="0 0 700 150" role="img" aria-label="Порядок операций на баре: сначала снятие проходом цены, затем размещение нового тепла, затем затухание"><defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs><rect x="14" y="28" width="196" height="76" rx="3" class="dg-face"/><rect x="14" y="28" width="3" height="76" class="dg-acc"/><text x="30" y="52" class="dg-txt" font-weight="600">1 · consume(low, high)</text><text x="30" y="72" class="dg-txt-s">снять всё, через что</text><text x="30" y="88" class="dg-txt-s">прошла цена</text><line x1="214" y1="66" x2="240" y2="66" class="dg-line" marker-end="url(#ar2)"/><rect x="246" y="28" width="196" height="76" rx="3" class="dg-face"/><rect x="246" y="28" width="3" height="76" class="dg-acc"/><text x="262" y="52" class="dg-txt" font-weight="600">2 · allocate(ΔOI, close)</text><text x="262" y="72" class="dg-txt-s">положить тепло на уровни</text><text x="262" y="88" class="dg-txt-s">ликвидации новых позиций</text><line x1="446" y1="66" x2="472" y2="66" class="dg-line" marker-end="url(#ar2)"/><rect x="478" y="28" width="196" height="76" rx="3" class="dg-face"/><rect x="478" y="28" width="3" height="76" class="dg-acc"/><text x="494" y="52" class="dg-txt" font-weight="600">3 · decay(Δt)</text><text x="494" y="72" class="dg-txt-s">приглушить всё</text><text x="494" y="88" class="dg-txt-s">остальное</text><text x="14" y="130" class="dg-txt-s">новые позиции открылись по цене закрытия бара — внутри него они ликвидированы быть не могли</text></svg>
+    <figcaption><span>Порядок жёстко зафиксирован.</span> Сначала снятие, потом размещение: новые позиции этого бара открылись по его цене закрытия и не могли быть ликвидированы внутри него же.</figcaption>
+  </figure>
+</section>
+
+<section id="s9">
+  <div class="sec-head"><span class="sec-num">§9</span><h2>Проверка на честность: баланс массы</h2></div>
+  <p>Каждый доллар всегда находится в одном из пяти мест:</p>
+  <div class="formula">Σ heat  =  contributed − consumed − decayed − removed</div>
+  <dl class="legend">
+    <dt>contributed</dt><dd>всего положено тепла за всё время</dd>
+    <dt>consumed</dt><dd>снято проходом цены</dd>
+    <dt>decayed</dt><dd>ушло на затухание</dd>
+    <dt>removed</dt><dd>списано закрытиями при ΔOI &lt; 0</dd>
+    <dt>dropped</dt><dd>приток без цены ликвидации, лонги на 1x <em>— вне тождества</em></dd>
+  </dl>
+  <p>Тождество проверяется в тестах с точностью 1e-12 после сотен тысяч операций — накопители используют компенсированное суммирование Неймайера, иначе за 1e5 шагов уплывает последняя значащая цифра.</p>
+  <div class="note">Если тождество нарушено — карта где-то потеряла или выдумала деньги. Оно ловит целый класс ошибок автоматически, без ручной проверки.</div>
+</section>
+
+<section id="s10">
+  <div class="sec-head"><span class="sec-num">§10</span><h2>Таймфреймы: одна карта, разные окна показа</h2></div>
+  <p>Карта <strong>строится один раз на самом мелком доступном разрешении</strong>. Старший таймфрейм — это только выбор моментов показа: берётся кадр базовой карты на закрытие каждого бара показа.</p>
+  <figure>
+    <svg viewBox="0 0 700 250" role="img" aria-label="Одна карта, построенная на минутных данных, показывается на разных таймфреймах выбором моментов показа"><defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs><text x="14" y="24" class="dg-txt">одна карта, построена на 1m</text><rect x="14" y="40" width="30" height="9" rx="1.5" class="dg-acc"/><rect x="14" y="56" width="54" height="9" rx="1.5" class="dg-acc"/><rect x="14" y="72" width="96" height="9" rx="1.5" class="dg-acc"/><rect x="14" y="88" width="132" height="9" rx="1.5" class="dg-heat"/><rect x="14" y="104" width="88" height="9" rx="1.5" class="dg-acc"/><rect x="14" y="120" width="120" height="9" rx="1.5" class="dg-heat"/><rect x="14" y="136" width="64" height="9" rx="1.5" class="dg-acc"/><rect x="14" y="152" width="40" height="9" rx="1.5" class="dg-acc"/><text x="14" y="196" class="dg-txt-s">состояние модели — одно</text><text x="250" y="36" class="dg-txt">1m</text><line x1="250" y1="60" x2="676" y2="60" class="dg-line" opacity=".45"/><line x1="250.0" y1="52" x2="250.0" y2="68" class="dg-acc-s"/><line x1="257.1" y1="52" x2="257.1" y2="68" class="dg-acc-s"/><line x1="264.2" y1="52" x2="264.2" y2="68" class="dg-acc-s"/><line x1="271.3" y1="52" x2="271.3" y2="68" class="dg-acc-s"/><line x1="278.4" y1="52" x2="278.4" y2="68" class="dg-acc-s"/><line x1="285.5" y1="52" x2="285.5" y2="68" class="dg-acc-s"/><line x1="292.6" y1="52" x2="292.6" y2="68" class="dg-acc-s"/><line x1="299.7" y1="52" x2="299.7" y2="68" class="dg-acc-s"/><line x1="306.8" y1="52" x2="306.8" y2="68" class="dg-acc-s"/><line x1="313.9" y1="52" x2="313.9" y2="68" class="dg-acc-s"/><line x1="321.0" y1="52" x2="321.0" y2="68" class="dg-acc-s"/><line x1="328.1" y1="52" x2="328.1" y2="68" class="dg-acc-s"/><line x1="335.2" y1="52" x2="335.2" y2="68" class="dg-acc-s"/><line x1="342.3" y1="52" x2="342.3" y2="68" class="dg-acc-s"/><line x1="349.4" y1="52" x2="349.4" y2="68" class="dg-acc-s"/><line x1="356.5" y1="52" x2="356.5" y2="68" class="dg-acc-s"/><line x1="363.6" y1="52" x2="363.6" y2="68" class="dg-acc-s"/><line x1="370.7" y1="52" x2="370.7" y2="68" class="dg-acc-s"/><line x1="377.8" y1="52" x2="377.8" y2="68" class="dg-acc-s"/><line x1="384.9" y1="52" x2="384.9" y2="68" class="dg-acc-s"/><line x1="392.0" y1="52" x2="392.0" y2="68" class="dg-acc-s"/><line x1="399.1" y1="52" x2="399.1" y2="68" class="dg-acc-s"/><line x1="406.2" y1="52" x2="406.2" y2="68" class="dg-acc-s"/><line x1="413.3" y1="52" x2="413.3" y2="68" class="dg-acc-s"/><line x1="420.4" y1="52" x2="420.4" y2="68" class="dg-acc-s"/><line x1="427.5" y1="52" x2="427.5" y2="68" class="dg-acc-s"/><line x1="434.6" y1="52" x2="434.6" y2="68" class="dg-acc-s"/><line x1="441.7" y1="52" x2="441.7" y2="68" class="dg-acc-s"/><line x1="448.8" y1="52" x2="448.8" y2="68" class="dg-acc-s"/><line x1="455.9" y1="52" x2="455.9" y2="68" class="dg-acc-s"/><line x1="463.0" y1="52" x2="463.0" y2="68" class="dg-acc-s"/><line x1="470.1" y1="52" x2="470.1" y2="68" class="dg-acc-s"/><line x1="477.2" y1="52" x2="477.2" y2="68" class="dg-acc-s"/><line x1="484.3" y1="52" x2="484.3" y2="68" class="dg-acc-s"/><line x1="491.4" y1="52" x2="491.4" y2="68" class="dg-acc-s"/><line x1="498.5" y1="52" x2="498.5" y2="68" class="dg-acc-s"/><line x1="505.6" y1="52" x2="505.6" y2="68" class="dg-acc-s"/><line x1="512.7" y1="52" x2="512.7" y2="68" class="dg-acc-s"/><line x1="519.8" y1="52" x2="519.8" y2="68" class="dg-acc-s"/><line x1="526.9" y1="52" x2="526.9" y2="68" class="dg-acc-s"/><line x1="534.0" y1="52" x2="534.0" y2="68" class="dg-acc-s"/><line x1="541.1" y1="52" x2="541.1" y2="68" class="dg-acc-s"/><line x1="548.2" y1="52" x2="548.2" y2="68" class="dg-acc-s"/><line x1="555.3" y1="52" x2="555.3" y2="68" class="dg-acc-s"/><line x1="562.4" y1="52" x2="562.4" y2="68" class="dg-acc-s"/><line x1="569.5" y1="52" x2="569.5" y2="68" class="dg-acc-s"/><line x1="576.6" y1="52" x2="576.6" y2="68" class="dg-acc-s"/><line x1="583.7" y1="52" x2="583.7" y2="68" class="dg-acc-s"/><line x1="590.8" y1="52" x2="590.8" y2="68" class="dg-acc-s"/><line x1="597.9" y1="52" x2="597.9" y2="68" class="dg-acc-s"/><line x1="605.0" y1="52" x2="605.0" y2="68" class="dg-acc-s"/><line x1="612.1" y1="52" x2="612.1" y2="68" class="dg-acc-s"/><line x1="619.2" y1="52" x2="619.2" y2="68" class="dg-acc-s"/><line x1="626.3" y1="52" x2="626.3" y2="68" class="dg-acc-s"/><line x1="633.4" y1="52" x2="633.4" y2="68" class="dg-acc-s"/><line x1="640.5" y1="52" x2="640.5" y2="68" class="dg-acc-s"/><line x1="647.6" y1="52" x2="647.6" y2="68" class="dg-acc-s"/><line x1="654.7" y1="52" x2="654.7" y2="68" class="dg-acc-s"/><line x1="661.8" y1="52" x2="661.8" y2="68" class="dg-acc-s"/><line x1="668.9" y1="52" x2="668.9" y2="68" class="dg-acc-s"/><line x1="676.0" y1="52" x2="676.0" y2="68" class="dg-acc-s"/><line x1="180" y1="60" x2="240" y2="60" class="dg-line" marker-end="url(#ar3)" opacity=".7"/><text x="250" y="98" class="dg-txt">15m</text><line x1="250" y1="122" x2="676" y2="122" class="dg-line" opacity=".45"/><line x1="250.0" y1="114" x2="250.0" y2="130" class="dg-acc-s"/><line x1="285.5" y1="114" x2="285.5" y2="130" class="dg-acc-s"/><line x1="321.0" y1="114" x2="321.0" y2="130" class="dg-acc-s"/><line x1="356.5" y1="114" x2="356.5" y2="130" class="dg-acc-s"/><line x1="392.0" y1="114" x2="392.0" y2="130" class="dg-acc-s"/><line x1="427.5" y1="114" x2="427.5" y2="130" class="dg-acc-s"/><line x1="463.0" y1="114" x2="463.0" y2="130" class="dg-acc-s"/><line x1="498.5" y1="114" x2="498.5" y2="130" class="dg-acc-s"/><line x1="534.0" y1="114" x2="534.0" y2="130" class="dg-acc-s"/><line x1="569.5" y1="114" x2="569.5" y2="130" class="dg-acc-s"/><line x1="605.0" y1="114" x2="605.0" y2="130" class="dg-acc-s"/><line x1="640.5" y1="114" x2="640.5" y2="130" class="dg-acc-s"/><line x1="676.0" y1="114" x2="676.0" y2="130" class="dg-acc-s"/><line x1="180" y1="122" x2="240" y2="122" class="dg-line" marker-end="url(#ar3)" opacity=".7"/><text x="250" y="160" class="dg-txt">1h</text><line x1="250" y1="184" x2="676" y2="184" class="dg-line" opacity=".45"/><line x1="250.0" y1="176" x2="250.0" y2="192" class="dg-acc-s"/><line x1="356.5" y1="176" x2="356.5" y2="192" class="dg-acc-s"/><line x1="463.0" y1="176" x2="463.0" y2="192" class="dg-acc-s"/><line x1="569.5" y1="176" x2="569.5" y2="192" class="dg-acc-s"/><line x1="676.0" y1="176" x2="676.0" y2="192" class="dg-acc-s"/><line x1="180" y1="184" x2="240" y2="184" class="dg-line" marker-end="url(#ar3)" opacity=".7"/><text x="250" y="238" class="dg-txt-s">каждая метка — кадр карты на закрытии бара показа; сама карта не пересчитывается</text></svg>
+    <figcaption><span>Таймфрейм не пересчитывает модель.</span> Одна и та же карта, разная частота кадров: на минутках их 60 в час, на часовике — один, но состояние модели в каждый момент одно и то же.</figcaption>
+  </figure>
+  <p>Почему не пересобирать карту из баров каждого таймфрейма: на минутках это 60 мелких снятий и размещений внутри часа, на часовике — одно снятие всего диапазона и одно размещение на закрытии. Получаются <strong>разные карты</strong>.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>ТФ показа</th><th>пересборка на каждом ТФ</th><th>одна карта, ТФ = окно показа</th></tr></thead>
+    <tbody>
+      <tr><td>5m</td><td class="num">0.939</td><td class="num win">1.000</td></tr>
+      <tr><td>15m</td><td class="num">0.826</td><td class="num win">1.000</td></tr>
+      <tr><td>1h</td><td class="num">0.678</td><td class="num win">1.000</td></tr>
+      <tr><td>4h</td><td class="num">0.578</td><td class="num win">1.000</td></tr>
+    </tbody>
+  </table></div>
+  <p>В таблице — косинус между итоговой картой и эталонной минутной на одной и той же истории. Затухание тут ни при чём: без затухания вовсе пересборка даёт 0.465.</p>
+  <div class="note"><b>Следствие: T½ не подгоняется под таймфрейм.</b> Экспонента безпамятна, и время жизни позиции не зависит от того, какой график открыт у трейдера. T½ — свойство инструмента; на что его умножать, на стенные часы или на часы торговой активности, — отдельный калибруемый выбор.</div>
+</section>
+
+<section id="s11">
+  <div class="sec-head"><span class="sec-num">§11</span><h2>Как читать картинку</h2></div>
+  <ul>
+    <li><strong>Тёмный коридор вдоль цены</strong> — там прошла цена, снятие очистило уровни.</li>
+    <li><strong>Яркие полосы выше и ниже</strong> — стоящие пулы ликвидаций; чем ярче, тем больше долларов.</li>
+    <li><strong>Полосы справа от последней свечи</strong> — проекция текущего состояния карты вперёд: «что ещё висит». Это отрисовка, а не прогноз.</li>
+    <li><strong>Подписи вида $63.7K</strong> — сколько долларов стоит на этом уровне.</li>
+    <li><strong>Цвет</strong> — логарифм тепла, нормированный по квантилям 0.55…0.995 ненулевых ячеек. Полный диапазон на плотной сетке вытягивает каждый слабый пул в яркую половину, и панель превращается в сплошную заливку.</li>
+  </ul>
+</section>
+
+<section id="s12">
+  <div class="sec-head"><span class="sec-num">§12</span><h2>Как проверяется, что карта не врёт</h2></div>
+  <p>Проверка идёт по реальному потоку ликвидаций <code>forceOrder</code>, который в саму карту не входит.</p>
+  <div class="formula">capture         <b>доля долларов реальных ликвидаций, попавшая в топ-дециль тепла</b>
+hot_area_share  <b>какую долю площади карта вообще подсвечивает</b>
+lift            <b>capture / hot_area_share</b></div>
+  <p>Смысл <code>lift</code>: карта, которая красит половину экрана, поймает много ликвидаций просто по площади. <code>lift</code> делит попадание на площадь и показывает, есть ли точность помимо ширины мазка.</p>
+  <p>Сравнение идёт с наивной базой: круглые уровни цены плюс недавние экстремумы свингов. Карта обязана обыгрывать эту базу <strong>на данных, которых не видела</strong>, с задержкой минимум в один бар — иначе она просто пересказывает уже случившееся.</p>
+</section>
+
+<section id="s13">
+  <div class="sec-head"><span class="sec-num">§13</span><h2>Все параметры одним списком</h2></div>
+  <div class="scroll"><table>
+    <thead><tr><th>Параметр</th><th>Что задаёт</th><th>По умолчанию</th><th>Как выбирать</th></tr></thead>
+    <tbody>
+      <tr><td>S</td><td>ширина ценовой корзины</td><td class="num">0.1 · ATR</td><td>по инструменту, не по ТФ графика</td></tr>
+      <tr><td>leverage_grid</td><td>какие плечи учитываем</td><td class="num">3…125</td><td>по факту доступных на бирже</td></tr>
+      <tr><td>w</td><td>доли притока по плечам</td><td class="num">затравка</td><td><strong>калибруется</strong></td></tr>
+      <tr><td>LS</td><td>доля лонгов в притоке</td><td class="num">0.5 или ratio</td><td>из потоков, коэффициенты калибруются</td></tr>
+      <tr><td>MMR, cum</td><td>тиры маржи</td><td class="num">таблица биржи</td><td>тянуть с биржи, не хардкодить</td></tr>
+      <tr><td>typical_account_usd</td><td>размер типового счёта для тира</td><td class="num">выкл.</td><td>калибруется</td></tr>
+      <tr><td>σ₀, σ₁</td><td>размытие уровня</td><td class="num">выкл.</td><td>калибруется</td></tr>
+      <tr><td>T½</td><td>полураспад тепла</td><td class="num">24 ч</td><td><strong>калибруется</strong>, единый для всех ТФ</td></tr>
+      <tr><td>wₖ, Tₖ</td><td>смесь полураспадов</td><td class="num">выкл.</td><td>калибруется</td></tr>
+      <tr><td>c</td><td>доля закрытий, снимающая тепло</td><td class="num">1.0</td><td>калибруется</td></tr>
+      <tr><td>fractional_edge_consume</td><td>частичное снятие краёв</td><td class="num">выкл.</td><td>влияет мало</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note">Все опции устроены одинаково: <b>значение по умолчанию воспроизводит прежнее поведение бит в бит</b>. Включение любой из них — сознательный шаг, который должен окупиться на калибровке.</div>
+</section>
+
+<section id="s14">
+  <div class="sec-head"><span class="sec-num">§14</span><h2>Что сделано и что нет</h2></div>
+  <div class="status">
+    <div class="status-card status-card--ok">
+      <h3>Работает и проверено · 840 тестов, 282 из них стрессовые</h3>
+      <ul>
+        <li>формула ликвидации совпадает с калькулятором биржи до 1e-12, включая тиры и cum;</li>
+        <li>геометрия снятия проверена точной арифметикой на тысячах случайных случаев;</li>
+        <li>затухание совпадает с точной рекурсией: 2000 последовательных полураспадов расходятся на единицы ulp;</li>
+        <li>баланс массы держится с точностью 1e-12 после сотен тысяч операций;</li>
+        <li>быстрый векторный построитель для калибровки совпадает с основной картой с машинной точностью — 2.7e-16;</li>
+        <li>карта не зависит от таймфрейма показа: совпадение 1.000 по построению;</li>
+        <li>судья проверки прошёл канареечный тест — на данных без сигнала не даёт ложного прохода.</li>
+      </ul>
+    </div>
+    <div class="status-card status-card--bad">
+      <h3>Не сделано</h3>
+      <ul>
+        <li><strong>Gate A не пройден</strong> — нет живой записи forceOrder. Без неё нельзя ни откалибровать веса, ни доказать, что карта что-то предсказывает. Единственный блокер;</li>
+        <li>запись потоков с текущего IP не работает: биржа отдаёт только depth. Нужен VPS;</li>
+        <li>значения T½, c, σ, typical_account_usd — априорные догадки, не измерения;</li>
+        <li>быстрый построитель пока не умеет смесь полураспадов — нужно до её калибровки;</li>
+        <li>суб-баровое распределение притока OI: сейчас весь приток бара кладётся по цене закрытия.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="note"><b>Коротко: механика собрана и доказана, предсказательная сила — нет.</b> Карта считает ровно то, что заявлено, без потерь и подглядываний в будущее. Полезна ли она для торговли — покажет калибровка на живых ликвидациях.</div>
+</section>
+
+<section id="s15">
+  <div class="sec-head"><span class="sec-num">§15</span><h2>Как запустить</h2></div>
+  <div class="pre-cmd"><i># карта на нескольких таймфреймах из одной модели</i>
+python scripts/map_multitf.py --synthetic --symbol SUIUSDT --price 3.42 \
+    --timeframes 1m 15m 1h 4h --days 5 --bucket-bps 25
+
+<i># то же на реальных данных из лейка</i>
+python scripts/map_multitf.py --lake data/vision_lake --symbol BTCUSDT \
+    --timeframes 1h 4h 1d --days 180
+
+<i># кто съедает уровни: цена, закрытия или затухание</i>
+python scripts/decay_vs_consume.py
+
+<i># сравнение законов затухания</i>
+python scripts/decay_law_frontier.py
+
+<i># согласованность между таймфреймами</i>
+python scripts/tf_consistency.py
+
+<i># проверка карты против реальных ликвидаций (нужен forceOrder в лейке)</i>
+python scripts/stage3_report.py --lake data/vision_lake --symbol BTCUSDT --lag-bars 1</div>
+</section>
+
+<footer>
+  <p>Источник: <code>docs/KARTA_LIKVIDNOSTI.md</code> в репозитории. Числа в документе — замеры на демо-рядах и тестах; на живых данных биржи модель ещё не проверялась.</p>
+</footer>
+
+</main>
+</div>
+</div>
