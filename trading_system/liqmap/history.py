@@ -66,6 +66,32 @@ class HeatHistory:
         i = self.index_at(ts, inclusive)
         return ([], [], []) if i is None else self.zones_at(i)
 
+    def resample(self, ts_seq) -> HeatHistory:
+        """Тот же ряд кадров, снятый на моменты `ts_seq` (для каждой метки —
+        последний кадр на-или-до неё).
+
+        Смена таймфрейма ОТОБРАЖЕНИЯ не должна пересчитывать модель: карта
+        строится один раз на самом мелком доступном разрешении, а старший ТФ
+        — это выбор моментов показа. Пересборка карты из грубых баров даёт
+        другую карту (снятие целым диапазоном бара и размещение раз в бар —
+        не то же самое, что 60 мелких шагов), и картинка «плывёт» с ТФ.
+        """
+        out = HeatHistory.__new__(HeatHistory)
+        out._map = self._map
+        out._bucket_size = self._bucket_size
+        out.ts, out._frames = [], []
+        prev = None
+        for t in ts_seq:
+            t = int(t)
+            if prev is not None and t < prev:
+                raise ValueError("моменты показа должны идти по возрастанию")
+            prev = t
+            i = self.index_at(t, inclusive=True)
+            if i is not None:
+                out.ts.append(t)
+                out._frames.append(self._frames[i])
+        return out
+
     def pools_at(self, i: int, k: int = 8) -> list[tuple[float, float]]:
         """Top-k pools of snapshot i as (bucket center price, heat), descending.
 

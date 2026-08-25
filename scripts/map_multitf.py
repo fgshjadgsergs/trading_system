@@ -97,6 +97,28 @@ def bars_from_lake(lake: Path, symbol: str, timeframe: str, limit: int) -> pl.Da
     return bars.with_columns(pl.col("d_oi_usd").fill_null(0.0))
 
 
+def aggregate_bars(bars: pl.DataFrame, factor: int) -> pl.DataFrame:
+    """Схлопывает `factor` баров в один: тот же ряд, более грубая НАРЕЗКА
+    показа. Модель на этом не пересчитывается — только рисунок свечей."""
+    if factor <= 1:
+        return bars
+    g = bars.with_row_index("_i").with_columns((pl.col("_i") // factor).alias("_g"))
+    aggs = [
+        pl.col("ts_open").first(), pl.col("ts_close").last(),
+        pl.col("open").first(), pl.col("high").max(),
+        pl.col("low").min(), pl.col("close").last(),
+    ]
+    for col in ("volume", "quote_volume", "d_oi_usd"):
+        if col in bars.columns:
+            aggs.append(pl.col(col).sum())
+    for col in ("atr", "long_share"):
+        if col in bars.columns:
+            aggs.append(pl.col(col).last())
+    if "symbol" in bars.columns:
+        aggs.append(pl.col("symbol").first())
+    return g.group_by("_g", maintain_order=True).agg(aggs).drop("_g")
+
+
 def parse_mixture(spec: str) -> list[tuple[float, float]]:
     """`0.75:4,0.25:336` -> [(0.75, 4ч в секундах), (0.25, 336ч)]."""
     out = []
@@ -155,6 +177,12 @@ def main() -> None:
     ap.add_argument("--bucket-bps", type=float, default=0.0,
                     help="шаг ценового бакета в bps от цены, единый для всех ТФ "
                          "(0 = из ATR своего таймфрейма, прежнее поведение)")
+    ap.add_argument("--base-tf", default=None,
+                    help="разрешение, на котором СТРОИТСЯ карта (по умолчанию — самый "
+                         "мелкий из --timeframes); старшие ТФ только показывают её")
+    ap.add_argument("--rebuild-per-tf", action="store_true",
+                    help="прежнее поведение: пересобирать карту из баров каждого ТФ "
+                         "(картинка зависит от таймфрейма — см. scripts/tf_consistency.py)")
     ap.add_argument("--out", default="reports/multitf")
     args = ap.parse_args()
     out = Path(args.out)
@@ -162,32 +190,66 @@ def main() -> None:
         raise SystemExit("укажите --lake с данными или --synthetic для демо")
     half_life = args.half_life_h * 3600.0
 
-    summary = []
-    for tf in args.timeframes:
-        if tf not in BARS_PER_DAY:
-            raise SystemExit(f"неизвестный таймфрейм {tf}; известны: {sorted(BARS_PER_DAY)}")
-        bar_s = TIMEFRAME_NS[tf] / 1e9
-        n_bars = BARS_PER_DAY[tf] * args.days
-        bars = (synth_series(n_bars, bar_s, price0=args.price, symbol=args.symbol,
+    unknown = [tf for tf in args.timeframes if tf not in BARS_PER_DAY]
+    if unknown:
+        raise SystemExit(f"неизвестные таймфреймы {unknown}; известны: {sorted(BARS_PER_DAY)}")
+    base = args.base_tf or min(args.timeframes, key=lambda t: TIMEFRAME_NS[t])
+    if base not in BARS_PER_DAY:
+        raise SystemExit(f"неизвестный базовый таймфрейм {base}")
+    if not args.rebuild_per_tf and any(
+        TIMEFRAME_NS[tf] % TIMEFRAME_NS[base] for tf in args.timeframes
+    ):
+        raise SystemExit(f"таймфреймы показа должны быть кратны базовому {base}")
+    if not args.rebuild_per_tf and TIMEFRAME_NS[base] > min(
+        TIMEFRAME_NS[t] for t in args.timeframes
+    ):
+        raise SystemExit("базовый таймфрейм грубее самого мелкого таймфрейма показа")
+
+    def load(tf: str) -> pl.DataFrame:
+        n = BARS_PER_DAY[tf] * args.days
+        return (synth_series(n, TIMEFRAME_NS[tf] / 1e9, price0=args.price, symbol=args.symbol,
                              daily_vol=args.daily_vol, oi_daily_usd=args.oi_daily)
                 if args.synthetic
-                else bars_from_lake(Path(args.lake), args.symbol, tf, n_bars))
-        lm, hist = build_map(
+                else bars_from_lake(Path(args.lake), args.symbol, tf, n))
+
+    def build(bars, bar_s):
+        return build_map(
             bars, bar_s, half_life, bucket_bps=args.bucket_bps,
             mixture=parse_mixture(args.mixture) if args.mixture else None,
             lev_tiers=parse_mixture(args.lev_tiers) if args.lev_tiers else None,
             close_out_fraction=args.close_out_fraction)
-        law = (f"тиры плеч {args.lev_tiers}" if args.lev_tiers else
-               f"смесь {args.mixture}" if args.mixture else
-               f"полураспад {args.half_life_h:.0f} ч")
+
+    law = (f"тиры плеч {args.lev_tiers}" if args.lev_tiers else
+           f"смесь {args.mixture}" if args.mixture else
+           f"полураспад {args.half_life_h:.0f} ч")
+    base_bars, lm, hist = None, None, None
+    if not args.rebuild_per_tf:
+        # ОДНА карта на самом мелком разрешении; старший ТФ — только окно
+        # показа. Пересборка из грубых баров даёт другую карту (снятие целым
+        # диапазоном бара вместо N мелких шагов), и картинка «плывёт» с ТФ.
+        base_bars = load(base)
+        lm, hist = build(base_bars, TIMEFRAME_NS[base] / 1e9)
+        log.info("base_map_built", base_tf=base, bars=base_bars.height,
+                 heat_usd=round(lm.total_heat()))
+
+    summary = []
+    for tf in args.timeframes:
+        if args.rebuild_per_tf:
+            bars = load(tf)
+            lm_tf, hist_tf = build(bars, TIMEFRAME_NS[tf] / 1e9)
+        else:
+            bars = aggregate_bars(base_bars, TIMEFRAME_NS[tf] // TIMEFRAME_NS[base])
+            lm_tf, hist_tf = lm, hist.resample(bars["ts_close"])
         title = (f"{args.symbol} · {tf} · {bars.height} баров ({args.days} дней) · {law}"
                  + (f" · бакет {args.bucket_bps:g} bps" if args.bucket_bps > 0 else "")
+                 + ("" if args.rebuild_per_tf else f" · карта построена на {base}")
                  + ("" if args.lake else " · демо-ряд"))
-        path = terminal_heat_overlay(bars, hist, name=f"map_{args.symbol.lower()}_{tf}",
+        path = terminal_heat_overlay(bars, hist_tf, name=f"map_{args.symbol.lower()}_{tf}",
                                      out_dir=out, title=title)
-        occ = sum(len(h) for h in lm.heat.values())
-        summary.append((tf, bars.height, lm.total_heat(), occ, float(bars["close"][-1]), path))
-        log.info("map_built", tf=tf, bars=bars.height, heat_usd=round(lm.total_heat()),
+        occ = sum(len(h) for h in lm_tf.heat.values())
+        summary.append((tf, bars.height, lm_tf.total_heat(), occ,
+                        float(bars["close"][-1]), path))
+        log.info("map_rendered", tf=tf, bars=bars.height, heat_usd=round(lm_tf.total_heat()),
                  occupied=occ, path=str(path))
 
     apply_style()
@@ -201,7 +263,9 @@ def main() -> None:
     axes[1].set_title("Разрежённость карты")
     for ax in axes:
         ax.set_xlabel("таймфрейм")
-    fig.suptitle(f"{args.symbol}: один закон затухания на всех ТФ", y=1.02)
+    fig.suptitle(f"{args.symbol}: " + ("карта пересобрана на каждом ТФ"
+                 if args.rebuild_per_tf else f"одна карта (построена на {base}), "
+                 "ТФ — только окно показа"), y=1.02)
     summary_path = save_fig(fig, f"map_{args.symbol.lower()}_summary", out)
     for tf, n, heat, occ, last, path in summary:
         print(f"{tf:>3} | {n:>6} баров | тепло {heat/1e6:8.2f} млн USD | бакетов {occ:>5} | "
