@@ -177,6 +177,9 @@ def main() -> None:
     ap.add_argument("--bucket-bps", type=float, default=0.0,
                     help="шаг ценового бакета в bps от цены, единый для всех ТФ "
                          "(0 = из ATR своего таймфрейма, прежнее поведение)")
+    ap.add_argument("--preset", choices=["coinglass"], default=None,
+                    help="coinglass: уровни живут, пока цена их не снимет — затухание "
+                         "и списание закрытий выключены (T½=inf, close_out_fraction=0)")
     ap.add_argument("--base-tf", default=None,
                     help="разрешение, на котором СТРОИТСЯ карта (по умолчанию — самый "
                          "мелкий из --timeframes); старшие ТФ только показывают её")
@@ -188,6 +191,9 @@ def main() -> None:
     out = Path(args.out)
     if not args.lake and not args.synthetic:
         raise SystemExit("укажите --lake с данными или --synthetic для демо")
+    if args.preset == "coinglass":
+        args.half_life_h = float("inf")
+        args.close_out_fraction = 0.0
     half_life = args.half_life_h * 3600.0
 
     unknown = [tf for tf in args.timeframes if tf not in BARS_PER_DAY]
@@ -221,6 +227,7 @@ def main() -> None:
 
     law = (f"тиры плеч {args.lev_tiers}" if args.lev_tiers else
            f"смесь {args.mixture}" if args.mixture else
+           "уровни живут до снятия ценой" if args.preset == "coinglass" else
            f"полураспад {args.half_life_h:.0f} ч")
     base_bars, lm, hist = None, None, None
     if not args.rebuild_per_tf:
