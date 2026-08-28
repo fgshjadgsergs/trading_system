@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Карта ликвидаций · live</title>
+<style>
+:root{--bg:#0d1117;--panel:#0d1117;--grid:#1d2733;--text:#9fb0bd;--up:#26a69a;
+--down:#ef5350;--hot:#ffe95c;--dim:#5c6f7a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+font:13px "SF Mono",Consolas,Menlo,monospace}
+header{display:flex;gap:1rem;align-items:center;padding:.6rem 1rem;
+border-bottom:1px solid var(--grid);flex-wrap:wrap}
+header h1{font-size:14px;margin:0;color:#c5d0d9;font-weight:600}
+select{background:var(--panel);color:#c5d0d9;border:1px solid var(--grid);
+padding:.25rem .5rem;border-radius:3px;font:inherit}
+#status{margin-left:auto;font-size:11px;color:var(--dim)}
+#status b{color:var(--up);font-weight:600}
+#wrap{position:relative;margin:10px;height:calc(100vh - 76px);min-height:320px}
+canvas{position:absolute;inset:0;width:100%;height:100%}
+#overlay{pointer-events:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Карта ликвидаций · live</h1>
+  <select id="symbol"></select>
+  <span id="status">подключение…</span>
+</header>
+<div id="wrap">
+  <canvas id="heat"></canvas>
+  <canvas id="overlay"></canvas>
+</div>
+<script>
+"use strict";
+/* Дорисовка, не перерисовка: тепловой слой append-only — новая колонка
+   рисуется однократно; полный repaint тепла случается только когда
+   меняется масштаб (диапазон цены/яркости вырос) или размер окна, и
+   считается в window.__fullRepaints (append'ы — в window.__appends).
+   Свечи и подписи — отдельный слой, он лёгкий и перерисовывается поверх. */
+window.__fullRepaints = 0; window.__appends = 0; window.__gapReloads = 0;
+
+const $ = id => document.getElementById(id);
+const heatCv = $("heat"), ovCv = $("overlay");
+const hx = heatCv.getContext("2d"), ox = ovCv.getContext("2d");
+
+const S = {
+  symbol: null, epoch: null, lastTs: 0,
+  frames: [],           // [{ts, cols:[[idx,heat],...]}]
+  bars: [],             // [{ts,ts_open,o,h,l,c}]
+  bucket: 1,
+  idxLo: null, idxHi: null,   // текущий диапазон карты по бакетам (для оси Y)
+  vmaxLog: 1,                 // масштаб яркости: log1p(heat)
+  drawnCols: 0,               // сколько кадров уже нарисовано на тепловом слое
+  maxCols: 1500,
+  colW: 6,
+};
+
+const LUT = (() => {         // teal -> yellow, как в терминальном рендере
+  const stops = [[13,17,23],[14,52,56],[15,127,116],[47,214,176],[255,238,88]];
+  const lut = [];
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255 * (stops.length - 1), j = Math.min(Math.floor(t), stops.length - 2), f = t - j;
+    lut.push(stops[j].map((c, k) => Math.round(c + (stops[j+1][k] - c) * f)));
+  }
+  return lut;
+})();
+
+function colColor(h) {
+  const v = Math.log1p(h) / S.vmaxLog;
+  const c = LUT[Math.max(0, Math.min(255, Math.round(v * 255)))];
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+function priceToY(p, H) {
+  const lo = S.idxLo * S.bucket, hi = (S.idxHi + 1) * S.bucket;
+  return H - (p - lo) / (hi - lo) * H;
+}
+
+function frameRange(fr) {
+  let lo = Infinity, hi = -Infinity, m = 0;
+  for (const [i, h] of fr.cols) { if (i < lo) lo = i; if (i > hi) hi = i; if (h > m) m = h; }
+  return [lo, hi, m];
+}
+
+function ensureScale(newFrames) {
+  /* Возвращает true, если масштаб изменился и нужен полный repaint тепла.
+     Запас 12% по цене и 30% по яркости, чтобы append был обычным путём. */
+  let lo = S.idxLo, hi = S.idxHi, vmax = Math.expm1(S.vmaxLog);
+  for (const fr of newFrames) {
+    const [l, h, m] = frameRange(fr);
+    if (l === Infinity) continue;
+    if (lo === null || l < lo) lo = l;
+    if (hi === null || h > hi) hi = h;
+    if (m > vmax) vmax = m;
+  }
+  for (const b of S.bars.slice(-newFrames.length)) {
+    const li = Math.floor(b.l / S.bucket), hi2 = Math.floor(b.h / S.bucket);
+    if (lo === null || li < lo) lo = li;
+    if (hi === null || hi2 > hi) hi = hi2;
+  }
+  if (lo === null) return false;
+  const changed = S.idxLo === null || lo < S.idxLo || hi > S.idxHi
+    || Math.log1p(vmax) > S.vmaxLog * 1.0001;
+  if (changed) {
+    const pad = Math.max(4, Math.round((hi - lo) * 0.12));
+    S.idxLo = lo - pad; S.idxHi = hi + pad;
+    S.vmaxLog = Math.log1p(vmax * 1.3);
+  }
+  return changed;
+}
+
+function drawCol(x, fr, W, H) {
+  const n = S.idxHi - S.idxLo + 1, rowH = H / n;
+  for (const [i, h] of fr.cols) {
+    if (i < S.idxLo || i > S.idxHi) continue;
+    hx.fillStyle = colColor(h);
+    hx.fillRect(x, H - (i - S.idxLo + 1) * rowH, S.colW, Math.max(rowH, 1));
+  }
+}
+
+function repaintHeat() {
+  const W = heatCv.width, H = heatCv.height;
+  hx.fillStyle = "#0d1117"; hx.fillRect(0, 0, W, H);
+  const start = Math.max(0, S.frames.length - S.maxCols);
+  const vis = S.frames.slice(start);
+  for (let k = 0; k < vis.length; k++) drawCol(k * S.colW, vis[k], W, H);
+  S.drawnCols = vis.length;
+  window.__fullRepaints++;
+}
+
+function appendHeat(newFrames) {
+  const W = heatCv.width, H = heatCv.height;
+  for (const fr of newFrames) {
+    if (S.drawnCols * S.colW + S.colW > W) {           // упёрлись в край: сдвиг влево
+      hx.drawImage(heatCv, S.colW, 0, W - S.colW, H, 0, 0, W - S.colW, H);
+      hx.fillStyle = "#0d1117";
+      hx.fillRect(W - S.colW, 0, S.colW, H);
+      S.drawnCols--;
+    }
+    drawCol(S.drawnCols * S.colW, fr, W, H);
+    S.drawnCols++;
+    window.__appends++;
+  }
+}
+
+function drawOverlay() {
+  const W = ovCv.width, H = ovCv.height;
+  ox.clearRect(0, 0, W, H);
+  if (!S.bars.length || S.idxLo === null) return;
+  const start = Math.max(0, S.bars.length - S.drawnCols);
+  const bars = S.bars.slice(start);
+  for (let k = 0; k < bars.length; k++) {
+    const b = bars[k], x = k * S.colW + S.colW / 2;
+    const up = b.c >= b.o;
+    ox.strokeStyle = ox.fillStyle = up ? "#26a69a" : "#ef5350";
+    ox.lineWidth = 1;
+    ox.beginPath();
+    ox.moveTo(x, priceToY(b.h, H)); ox.lineTo(x, priceToY(b.l, H)); ox.stroke();
+    const y1 = priceToY(Math.max(b.o, b.c), H), y2 = priceToY(Math.min(b.o, b.c), H);
+    ox.fillRect(x - S.colW * 0.32, y1, S.colW * 0.64, Math.max(y2 - y1, 1));
+  }
+  const last = bars[bars.length - 1];
+  const y = priceToY(last.c, H);
+  ox.strokeStyle = "#c5d0d9"; ox.setLineDash([5, 4]); ox.lineWidth = 0.8;
+  ox.beginPath(); ox.moveTo(0, y); ox.lineTo(W, y); ox.stroke(); ox.setLineDash([]);
+  ox.fillStyle = last.c >= last.o ? "#26a69a" : "#ef5350";
+  const label = fmtPrice(last.c);
+  ox.font = "11px monospace";
+  const tw = ox.measureText(label).width + 10;
+  ox.fillRect(W - tw, y - 9, tw, 18);
+  ox.fillStyle = "#0d1117"; ox.textAlign = "right";
+  ox.fillText(label, W - 5, y + 4);
+  // ценовая шкала слева
+  ox.fillStyle = "#5c6f7a"; ox.textAlign = "left";
+  const ticks = 6;
+  for (let t = 0; t <= ticks; t++) {
+    const p = (S.idxLo + (S.idxHi - S.idxLo + 1) * t / ticks) * S.bucket;
+    ox.fillText(fmtPrice(p), 4, priceToY(p, H) - 3);
+  }
+  // топ-пулы последнего кадра
+  const fr = S.frames[S.frames.length - 1];
+  if (fr) {
+    const top = [...fr.cols].sort((a, b) => b[1] - a[1]).slice(0, 5);
+    ox.textAlign = "right"; ox.fillStyle = "#ffe95c";
+    for (const [i, h] of top) {
+      const py = priceToY((i + 0.5) * S.bucket, H);
+      if (Math.abs(py - y) < 12) continue;
+      ox.fillText(fmtUsd(h), W - 5, py + 3);
+    }
+  }
+}
+
+const fmtPrice = p => p >= 1000 ? p.toFixed(0) : p >= 10 ? p.toFixed(2) : p.toFixed(4);
+const fmtUsd = v => v >= 1e9 ? `$${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `$${(v/1e6).toFixed(1)}M`
+  : v >= 1e3 ? `$${(v/1e3).toFixed(1)}K` : `$${v.toFixed(0)}`;
+
+function resize() {
+  const r = $("wrap").getBoundingClientRect();
+  for (const cv of [heatCv, ovCv]) { cv.width = r.width; cv.height = r.height; }
+  S.maxCols = Math.max(50, Math.floor(heatCv.width / S.colW));
+  if (S.frames.length) { repaintHeat(); drawOverlay(); }
+}
+window.addEventListener("resize", resize);
+
+async function api(path) {
+  const r = await fetch(path, {cache: "no-store"});
+  if (!r.ok) throw new Error(`${path}: ${r.status}`);
+  return r.json();
+}
+
+function setStatus(txt) { $("status").innerHTML = txt; }
+
+async function loadSnapshot() {
+  const snap = await api(`/api/snapshot?symbol=${S.symbol}`);
+  S.epoch = snap.epoch; S.bucket = snap.bucket_size;
+  S.frames = snap.frames; S.bars = snap.bars; S.lastTs = snap.last_ts || 0;
+  S.idxLo = S.idxHi = null; S.vmaxLog = 1;
+  ensureScale(S.frames);
+  repaintHeat(); drawOverlay();
+}
+
+async function tick() {
+  try {
+    if (!S.epoch) { await loadSnapshot(); }
+    const d = await api(`/api/delta?symbol=${S.symbol}&since=${S.lastTs}&epoch=${S.epoch}`);
+    if (d.gap || d.epoch !== S.epoch) {           // рестарт/обновление сервера
+      window.__gapReloads++;
+      await loadSnapshot();
+    } else if (d.frames.length) {
+      S.frames.push(...d.frames); S.bars.push(...d.bars);
+      const over = S.frames.length - 3 * S.maxCols;
+      if (over > 0) { S.frames.splice(0, over); S.bars.splice(0, over); }
+      S.lastTs = d.last_ts;
+      if (ensureScale(d.frames)) repaintHeat(); else appendHeat(d.frames);
+      drawOverlay();
+    }
+    const fr = S.frames[S.frames.length - 1];
+    const total = fr ? fr.cols.reduce((a, c) => a + c[1], 0) : 0;
+    setStatus(`эпоха <b>${S.epoch}</b> · кадров ${S.frames.length} · ` +
+      `тепло ${fmtUsd(total)} · дорисовок ${window.__appends} · ` +
+      `полных перерисовок ${window.__fullRepaints}`);
+  } catch (e) {
+    setStatus(`нет связи: ${e.message}`);
+  }
+}
+
+async function main() {
+  const meta = await api("/api/meta");
+  const sel = $("symbol");
+  sel.innerHTML = meta.symbols.map(s => `<option>${s}</option>`).join("");
+  S.symbol = meta.symbols[0];
+  sel.onchange = async () => { S.symbol = sel.value; S.epoch = null; await tick(); };
+  resize();
+  await tick();
+  setInterval(tick, 2000);
+}
+main();
+</script>
+</body>
+</html>

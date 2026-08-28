@@ -36,6 +36,9 @@ boost = ["lightgbm>=4"]
 [tool.setuptools.packages.find]
 include = ["trading_system*"]
 
+[tool.setuptools.package-data]
+"trading_system.platform" = ["static/*.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

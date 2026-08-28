@@ -36,7 +36,7 @@ from trading_system.collectors.recorder import BatchWriter, RestPoller
 from trading_system.collectors.sequencer import DepthSequencer, GapEvent
 from trading_system.collectors.ws_client import websockets_transport_factory
 from trading_system.core.config import load_config
-from trading_system.core.schema import BookSnapshot, DepthDiff
+from trading_system.core.schema import BookSnapshot, DepthDiff, MarkPrice
 from trading_system.core.timeutils import now_ns
 
 log = structlog.get_logger()
@@ -109,6 +109,9 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
         resync_pending.add(sym)
 
     rest_base = ex_cfg["rest_base"]
+    # последняя mark-цена из ws-потока: без неё open_interest_usd = NaN и
+    # весь USD-номинал OI пришлось бы восстанавливать задним числом
+    last_mark: dict[str, float] = {}
     pollers = []
     for sym in symbols:
         pollers.append(
@@ -116,7 +119,9 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
                 float(col_cfg["open_interest_poll_s"]),
                 partial(http_get_json, f"{rest_base}/fapi/v1/openInterest", {"symbol": sym}),
                 # parse_open_interest returns ONE record; RestPoller iterates
-                lambda payload, ts_recv: [parse_open_interest(payload, ts_recv)],
+                lambda payload, ts_recv, s=sym: [
+                    parse_open_interest(payload, ts_recv, price=last_mark.get(s))
+                ],
                 writer.add,
             )
         )
@@ -159,6 +164,8 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
             for rec in adapter.normalize(raw):
                 name = type(rec).__name__
                 rec_counts[name] = rec_counts.get(name, 0) + 1
+                if isinstance(rec, MarkPrice):
+                    last_mark[rec.symbol] = rec.mark_price
                 if isinstance(rec, DepthDiff):
                     seq = sequencers[rec.symbol]
                     for ready in seq.add_diff(rec):
