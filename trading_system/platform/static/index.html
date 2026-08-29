@@ -32,6 +32,11 @@ pointer-events:none}
 <header>
   <h1>Карта ликвидаций · live</h1>
   <select id="symbol"></select>
+  <select id="tf" title="таймфрейм показа — карта одна, меняется только нарезка">
+    <option value="1">1m</option><option value="5">5m</option>
+    <option value="15">15m</option><option value="30">30m</option>
+    <option value="60">1h</option>
+  </select>
   <button id="zin" title="крупнее по времени">＋</button>
   <button id="zout" title="мельче по времени">－</button>
   <button id="follow" class="active" title="прилипнуть к последнему бару и авто-диапазону">авто</button>
@@ -57,10 +62,38 @@ const hx = heatCv.getContext("2d"), ox = ovCv.getContext("2d");
 
 const S = {
   symbol: null, epoch: null, lastTs: 0,
-  frames: [], bars: [],        // полные локальные данные (хвост кольца сервера)
+  frames: [], bars: [],        // сырые минутные данные (хвост кольца сервера)
   bucket: 1, vmaxLog: 1,
   keep: 6000,                  // сколько кадров держим локально
-};
+  tf: 1,                       // таймфрейм ПОКАЗА в минутах: карта одна,
+};                             // меняется только нарезка свечей и кадров
+const D = { frames: [], bars: [] };   // вид: агрегированные свечи + кадры
+const MIN_NS = 60_000_000_000;
+
+function buildDisplay() {
+  /* Тот же принцип, что и в статичном рендере: старший ТФ не пересчитывает
+     карту — свечи схлопываются группами по ts_open, кадр группы = последний
+     сырой кадр в ней (состояние карты на закрытии бара показа). Последняя
+     группа может быть НЕполной — это формирующаяся свеча. */
+  const F = S.tf;
+  if (F === 1) { D.frames = S.frames; D.bars = S.bars; return; }
+  const span = F * MIN_NS;
+  D.frames = []; D.bars = [];
+  let g = null, cur = null;
+  for (let i = 0; i < S.bars.length; i++) {
+    const b = S.bars[i], gi = Math.floor(b.ts_open / span);
+    if (gi !== g) {
+      g = gi;
+      cur = {ts: b.ts, ts_open: b.ts_open, o: b.o, h: b.h, l: b.l, c: b.c};
+      D.bars.push(cur); D.frames.push(S.frames[i]);
+    } else {
+      cur.ts = b.ts; cur.c = b.c;
+      if (b.h > cur.h) cur.h = b.h;
+      if (b.l < cur.l) cur.l = b.l;
+      D.frames[D.frames.length - 1] = S.frames[i];
+    }
+  }
+}
 const V = {                    // вид
   follow: true,                // авто: правый край = последний бар, Y по свечам
   colW: 6,                     // пикселей на бар (зум по времени)
@@ -99,7 +132,7 @@ function autoRange() {
   const n = visCount(), from = V.end - n + 1;
   let lo = Infinity, hi = -Infinity;
   for (let i = Math.max(0, from); i <= V.end; i++) {
-    const b = S.bars[i];
+    const b = D.bars[i];
     if (!b) continue;
     if (b.l < lo) lo = b.l;
     if (b.h > hi) hi = b.h;
@@ -133,7 +166,7 @@ function viewScale() {
   const vals = [];
   const iLo = Math.floor(V.pLo / S.bucket), iHi = Math.ceil(V.pHi / S.bucket);
   for (let i = from; i <= V.end; i++) {
-    const fr = S.frames[i];
+    const fr = D.frames[i];
     if (!fr) continue;
     for (const [idx, h] of fr.cols)
       if (idx >= iLo && idx <= iHi && h > 0) vals.push(Math.log1p(h));
@@ -145,13 +178,31 @@ function viewScale() {
   if (!(V.qHi > V.qLo)) { V.qLo = 0; V.qHi = Math.max(S.vmaxLog, 1); }
 }
 
+function drawProjection() {
+  /* пустота справа от последней колонки = проекция ТЕКУЩЕГО кадра вперёд —
+     «что ещё висит», как в статичном рендере; это представление, не прогноз */
+  const x0 = V.drawnCols * V.colW;
+  if (x0 >= W()) return;
+  hx.fillStyle = "#0d1117"; hx.fillRect(x0, 0, W() - x0, H());
+  const fr = D.frames[V.end];
+  if (!fr) return;
+  const rowPx = S.bucket / (V.pHi - V.pLo) * H();
+  for (const [i, h] of fr.cols) {
+    const yTop = priceToY((i + 1) * S.bucket);
+    if (yTop > H() || yTop + rowPx < 0) continue;
+    hx.fillStyle = colColor(h);
+    hx.fillRect(x0, yTop, W() - x0, Math.max(rowPx, 1));
+  }
+}
+
 function repaintHeat() {
   viewScale();
   hx.fillStyle = "#0d1117"; hx.fillRect(0, 0, W(), H());
   const n = visCount(), from = V.end - n + 1;
   for (let i = Math.max(0, from); i <= V.end; i++)
-    drawCol((i - from) * V.colW, S.frames[i]);
+    drawCol((i - from) * V.colW, D.frames[i]);
   V.drawnCols = n; V.drawnEnd = V.end;
+  drawProjection();
   window.__fullRepaints++;
 }
 
@@ -164,18 +215,19 @@ function appendHeat(count) {
       hx.fillStyle = "#0d1117"; hx.fillRect(W() - V.colW, 0, V.colW, H());
       V.drawnCols--;
     }
-    drawCol(V.drawnCols * V.colW, S.frames[idx]);
+    drawCol(V.drawnCols * V.colW, D.frames[idx]);
     V.drawnCols++; window.__appends++;
   }
   V.drawnEnd = V.end;
+  drawProjection();
 }
 
 function drawOverlay() {
   ox.clearRect(0, 0, W(), H());
-  if (!S.bars.length) return;
+  if (!D.bars.length) return;
   const n = visCount(), from = Math.max(0, V.end - n + 1);
   for (let i = from; i <= V.end; i++) {
-    const b = S.bars[i];
+    const b = D.bars[i];
     if (!b) continue;
     const x = (i - from) * V.colW + V.colW / 2, up = b.c >= b.o;
     ox.strokeStyle = ox.fillStyle = up ? "#26a69a" : "#ef5350";
@@ -184,7 +236,7 @@ function drawOverlay() {
     const y1 = priceToY(Math.max(b.o, b.c)), y2 = priceToY(Math.min(b.o, b.c));
     ox.fillRect(x - V.colW * 0.34, y1, V.colW * 0.68, Math.max(y2 - y1, 1));
   }
-  const last = S.bars[S.bars.length - 1];
+  const last = D.bars[D.bars.length - 1];
   if (last) {
     const y = priceToY(last.c);
     if (y >= 0 && y <= H()) {
@@ -202,7 +254,7 @@ function drawOverlay() {
     const p = V.pLo + (V.pHi - V.pLo) * t / 6;
     ox.fillText(fmtPrice(p), 4, priceToY(p) - 3);
   }
-  const fr = S.frames[V.end];
+  const fr = D.frames[V.end];
   if (fr) {
     const lastY = last ? priceToY(last.c) : -99;
     const top = [...fr.cols].sort((a, b) => b[1] - a[1]).slice(0, 6);
@@ -215,7 +267,7 @@ function drawOverlay() {
   }
 }
 
-function refreshView() { if (V.follow) { V.end = S.frames.length - 1; autoRange(); }
+function refreshView() { if (V.follow) { V.end = D.frames.length - 1; autoRange(); }
   repaintHeat(); drawOverlay(); }
 
 const fmtPrice = p => p >= 1000 ? p.toFixed(0) : p >= 10 ? p.toFixed(2) : p.toFixed(4);
@@ -250,7 +302,7 @@ wrap.addEventListener("pointermove", e => {
   const dp = (e.clientY - drag.y) / H() * (V.pHi - V.pLo);
   V.pLo = drag.pLo - dp; V.pHi = drag.pHi - dp;
   const dCols = Math.round((e.clientX - drag.x) / V.colW);
-  V.end = Math.max(Math.min(drag.end - dCols, S.frames.length - 1), Math.min(20, S.frames.length - 1));
+  V.end = Math.max(Math.min(drag.end - dCols, D.frames.length - 1), Math.min(20, D.frames.length - 1));
   if (V.follow && (dp || dCols)) { V.follow = false; $("follow").classList.remove("active"); }
   repaintHeat(); drawOverlay();
 });
@@ -265,7 +317,7 @@ $("zout").onclick = () => { V.colW = Math.max(2, V.colW * 0.8); refreshView(); }
 function resize() {
   const r = wrap.getBoundingClientRect();
   for (const cv of [heatCv, ovCv]) { cv.width = r.width; cv.height = r.height; }
-  if (S.frames.length) refreshView();
+  if (D.frames.length) refreshView();
 }
 window.addEventListener("resize", resize);
 
@@ -282,7 +334,8 @@ async function loadSnapshot() {
   S.epoch = snap.epoch; S.bucket = snap.bucket_size;
   S.frames = snap.frames; S.bars = snap.bars; S.lastTs = snap.last_ts || 0;
   S.vmaxLog = 1; updateVmax(S.frames);
-  V.end = S.frames.length - 1;
+  buildDisplay();
+  V.end = D.frames.length - 1;
   if (V.follow || V.pHi <= V.pLo) { V.follow = true; $("follow").classList.add("active"); autoRange(); }
   repaintHeat(); drawOverlay();
 }
@@ -297,27 +350,43 @@ async function tick() {
     } else if (d.frames.length) {
       S.frames.push(...d.frames); S.bars.push(...d.bars);
       const over = S.frames.length - S.keep;
-      if (over > 0) { S.frames.splice(0, over); S.bars.splice(0, over);
-        V.end = Math.max(0, V.end - over); V.drawnEnd = Math.max(0, V.drawnEnd - over); }
+      if (over > 0) {
+        S.frames.splice(0, over); S.bars.splice(0, over);
+        const shift = Math.ceil(over / S.tf);   // консервативный сдвиг вида
+        V.end = Math.max(0, V.end - shift); V.drawnEnd = Math.max(0, V.drawnEnd - shift);
+      }
       S.lastTs = d.last_ts;
       const vmaxGrew = updateVmax(d.frames);
+      const prevCols = D.bars.length;
+      buildDisplay();
       if (V.follow) {
-        V.end = S.frames.length - 1;
+        V.end = D.frames.length - 1;
         // гистерезис: окно цены ЛИПКОЕ — пересчитываем его только когда
         // последняя свеча подошла к краю; иначе вид не меняется и новые
         // колонки просто дорисовываются (append — штатный путь)
-        const b = S.bars[S.bars.length - 1];
+        const b = D.bars[D.bars.length - 1];
         const margin = (V.pHi - V.pLo) * 0.04;
         const cramped = !b || b.h > V.pHi - margin || b.l < V.pLo + margin;
         if (cramped) autoRange();
         if (cramped || vmaxGrew) repaintHeat();
-        else appendHeat(V.end - V.drawnEnd);
+        else {
+          // законченные колонки показа дорисовываются; формирующаяся
+          // (последняя) переписывается по месту — это не перерисовка вида
+          const newCols = D.bars.length - prevCols;
+          appendHeat(Math.max(newCols, 0));
+          if (newCols === 0 && V.drawnCols > 0) {
+            const x = (V.drawnCols - 1) * V.colW;
+            hx.fillStyle = "#0d1117"; hx.fillRect(x, 0, V.colW, H());
+            drawCol(x, D.frames[V.end]);
+            drawProjection();
+          }
+        }
       }               // follow выключен: экран заморожен, данные копятся молча
       drawOverlay();
     }
     const fr = S.frames[S.frames.length - 1];
     const total = fr ? fr.cols.reduce((a, c) => a + c[1], 0) : 0;
-    setStatus(`эпоха <b>${S.epoch}</b> · кадров ${S.frames.length} · ` +
+    setStatus(`эпоха <b>${S.epoch}</b> · кадров ${D.frames.length} · ` +
       `тепло ${fmtUsd(total)} · дорисовок ${window.__appends} · ` +
       `перерисовок ${window.__fullRepaints}${V.follow ? "" : " · <b>пауза</b>"}`);
   } catch (e) { setStatus(`нет связи: ${e.message}`); }
@@ -329,6 +398,12 @@ async function main() {
   sel.innerHTML = meta.symbols.map(s => `<option>${s}</option>`).join("");
   S.symbol = meta.symbols[0];
   sel.onchange = async () => { S.symbol = sel.value; S.epoch = null; setFollow(true); await tick(); };
+  $("tf").onchange = () => {
+    S.tf = parseInt($("tf").value, 10);
+    buildDisplay();
+    setFollow(true);       // смена нарезки — новый вид: авто-кадр и перерисовка
+    refreshView();
+  };
   resize();
   await tick();
   setInterval(tick, 2000);
