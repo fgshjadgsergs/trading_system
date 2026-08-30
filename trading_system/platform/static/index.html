@@ -349,7 +349,8 @@ function refreshView() { if (V.follow) { V.end = D.frames.length - 1; autoRange(
   repaintHeat(); drawOverlay(); }
 
 const fmtPrice = p => p >= 1000 ? p.toFixed(0) : p >= 10 ? p.toFixed(2) : p.toFixed(4);
-const fmtUsd = v => v >= 1e9 ? `$${(v/1e9).toFixed(1)}B` : v >= 1e6 ? `$${(v/1e6).toFixed(1)}M`
+// «млрд/млн» словами: суффикс B в моно-шрифте читается как цифра 8
+const fmtUsd = v => v >= 1e9 ? `$${(v/1e9).toFixed(2)} млрд` : v >= 1e6 ? `$${(v/1e6).toFixed(1)} млн`
   : v >= 1e3 ? `$${(v/1e3).toFixed(1)}K` : `$${v.toFixed(0)}`;
 
 /* --- управление видом --- */
