@@ -26,7 +26,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import structlog
 
-from scripts.record_live import http_get_json
+from scripts.record_live import http_get_json as _http_get_json
+
+
+async def http_get_json(url: str, params: dict | None = None) -> dict | list:
+    """Обёртка с видимым прогрессом и ретраями: бэкфилл — интерактивный
+    скрипт, молчаливое зависание на одном запросе выглядит как смерть."""
+    for attempt in range(4):
+        try:
+            return await asyncio.wait_for(_http_get_json(url, params), timeout=15)
+        except Exception as exc:  # noqa: BLE001 - ретраим любой сбой запроса
+            wait = 2 ** attempt
+            print(f"  запрос не прошёл ({exc!r}), повтор через {wait} с "
+                  f"[{url.rsplit('/', 1)[-1]}]", flush=True)
+            await asyncio.sleep(wait)
+    raise SystemExit(f"эндпоинт не отвечает после 4 попыток: {url}")
 from trading_system.collectors.binance import (
     parse_global_ls_account,
     parse_rest_klines,
@@ -72,6 +86,7 @@ def parse_oi_hist(payload: list[dict], ts_recv: int) -> list[OpenInterest]:
 
 async def backfill_symbol(lake: Path, rest_base: str, sym: str, days: int) -> dict[str, int]:
     added = {"kline": 0, "open_interest": 0, "ratio": 0}
+    print(f"{sym}: тяну свечи…", flush=True)
     now_ms = now_ns() // 1_000_000
     start_ms = now_ms - days * 86_400_000
 
@@ -98,6 +113,7 @@ async def backfill_symbol(lake: Path, rest_base: str, sym: str, days: int) -> di
         await asyncio.sleep(0.15)  # вежливый темп: лимиты REST общие с рекордером
 
     # -- открытый интерес: /futures/data/openInterestHist, шаг 5m -------------
+    print(f"{sym}: свечей +{added['kline']}, тяну открытый интерес…", flush=True)
     have = last_ts_in_lake(lake, "open_interest", sym, "ts_event")
     cursor = max(start_ms, have // 1_000_000 + 1)
     while cursor < now_ms:
@@ -118,6 +134,7 @@ async def backfill_symbol(lake: Path, rest_base: str, sym: str, days: int) -> di
         await asyncio.sleep(0.15)
 
     # -- ратио: три метрики, тот же формат окна -------------------------------
+    print(f"{sym}: OI +{added['open_interest']}, тяну ратио…", flush=True)
     have = last_ts_in_lake(lake, "ratio", sym, "ts_event")
     for path, parser in RATIO_PARSERS.items():
         cursor = max(start_ms, have // 1_000_000 + 1)
