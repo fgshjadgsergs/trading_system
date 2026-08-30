@@ -24,8 +24,8 @@ cursor:grab;touch-action:none}
 #wrap.drag{cursor:grabbing}
 canvas{position:absolute;inset:0;width:100%;height:100%}
 #overlay{pointer-events:none}
-#hint{position:absolute;left:10px;bottom:8px;font-size:10px;color:var(--dim);
-pointer-events:none}
+#hint{position:absolute;left:10px;bottom:28px;font-size:10px;color:var(--dim);
+pointer-events:none;background:rgba(13,17,23,.85);padding:2px 7px;border-radius:3px}
 </style>
 </head>
 <body>
@@ -100,7 +100,8 @@ const V = {                    // вид
   pLo: 0, pHi: 1,              // окно цены (зум/пан по цене)
   end: 0,                      // индекс кадра у правого края (пан по времени)
   drawnCols: 0, drawnEnd: 0,   // что реально лежит на тепловом слое
-  qLo: 0, qHi: 1,              // цветовая шкала текущего вида (log1p-квантили)
+  qLo: 0, qHi: 1,              // цветовая шкала данных (log1p-квантили)
+  hover: null,                 // {x, y} курсора для перекрестия
 };
 
 const LUT = (() => {
@@ -160,17 +161,20 @@ function drawCol(x, fr) {
   }
 }
 
-function viewScale() {
-  /* квантили log1p тепла ВИДИМЫХ ячеек: 0.55 -> тьма, 0.995 -> максимум */
-  const n = visCount(), from = Math.max(0, V.end - n + 1);
+let scaleFramesAt = 0;   // сколько сырых кадров было при последнем расчёте шкалы
+function globalScale() {
+  /* СТАБИЛЬНАЯ шкала: квантили log1p тепла по ВСЕМ локальным кадрам
+     (сэмплированно), а не по видимым — иначе полосы меняют цвет и «исчезают»
+     при каждом зуме или сдвиге. Пересчёт только при снапшоте и заметном
+     росте данных (см. tick) — НИКОГДА при зуме/пане. */
+  const step = Math.max(1, Math.floor(D.frames.length / 400));
   const vals = [];
-  const iLo = Math.floor(V.pLo / S.bucket), iHi = Math.ceil(V.pHi / S.bucket);
-  for (let i = from; i <= V.end; i++) {
+  for (let i = 0; i < D.frames.length; i += step) {
     const fr = D.frames[i];
     if (!fr) continue;
-    for (const [idx, h] of fr.cols)
-      if (idx >= iLo && idx <= iHi && h > 0) vals.push(Math.log1p(h));
+    for (const [, h] of fr.cols) if (h > 0) vals.push(Math.log1p(h));
   }
+  scaleFramesAt = S.frames.length;
   if (vals.length < 8) { V.qLo = 0; V.qHi = Math.max(S.vmaxLog, 1); return; }
   vals.sort((a, b) => a - b);
   V.qLo = vals[Math.floor(vals.length * 0.55)];
@@ -196,7 +200,6 @@ function drawProjection() {
 }
 
 function repaintHeat() {
-  viewScale();
   hx.fillStyle = "#0d1117"; hx.fillRect(0, 0, W(), H());
   const n = visCount(), from = V.end - n + 1;
   for (let i = Math.max(0, from); i <= V.end; i++)
@@ -265,6 +268,67 @@ function drawOverlay() {
       ox.fillText(fmtUsd(h), W() - 5, py + 3);
     }
   }
+  drawTimeAxis(from);
+  drawCrosshair(from);
+}
+
+function fmtTime(ts, withDate) {
+  const d = new Date(ts / 1e6);
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const dm = `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`;
+  return withDate ? `${dm} ${hm}` : hm;
+}
+
+function drawTimeAxis(from) {
+  /* метки времени по нижнему краю; дата добавляется на границе суток и на
+     старших ТФ, где чистое «чч:мм» неоднозначно */
+  const n = visCount();
+  if (!n) return;
+  const every = Math.max(1, Math.ceil(120 / V.colW));   // метка раз в ~120px
+  ox.fillStyle = "#5c6f7a"; ox.textAlign = "center"; ox.font = "10px monospace";
+  let prevDay = null;
+  for (let i = from; i <= V.end; i++) {
+    const b = D.bars[i];
+    if (!b) continue;
+    const day = new Date(b.ts_open / 1e6).getDate();
+    const dayEdge = prevDay !== null && day !== prevDay;
+    prevDay = day;
+    if ((i - from) % every !== 0 && !dayEdge) continue;
+    const x = (i - from) * V.colW + V.colW / 2;
+    ox.fillText(fmtTime(b.ts_open, dayEdge || S.tf >= 30), x, H() - 6);
+    ox.fillRect(x - 0.5, H() - 20, 1, 4);
+  }
+}
+
+function drawCrosshair(from) {
+  if (!V.hover) return;
+  const {x, y} = V.hover;
+  const i = from + Math.floor(x / V.colW);
+  const b = D.bars[i];
+  ox.strokeStyle = "#5c6f7a"; ox.lineWidth = 0.6; ox.setLineDash([3, 3]);
+  ox.beginPath(); ox.moveTo(0, y); ox.lineTo(W(), y); ox.stroke();
+  if (b) {
+    const bx = (i - from) * V.colW + V.colW / 2;
+    ox.beginPath(); ox.moveTo(bx, 0); ox.lineTo(bx, H()); ox.stroke();
+  }
+  ox.setLineDash([]);
+  // плашка: время свечи, OHLC, цена под курсором и тепло её бакета
+  const p = yToPrice(y);
+  const idx = Math.floor(p / S.bucket);
+  const fr2 = D.frames[Math.min(i, V.end)];
+  let heat = 0;
+  if (fr2) for (const [ci, h] of fr2.cols) if (ci === idx) { heat = h; break; }
+  const lines = [];
+  if (b) lines.push(`${fmtTime(b.ts_open, true)}  O ${fmtPrice(b.o)}  H ${fmtPrice(b.h)}  L ${fmtPrice(b.l)}  C ${fmtPrice(b.c)}`);
+  lines.push(`цена ${fmtPrice(p)}` + (heat > 0 ? `  тепло ${fmtUsd(heat)}` : ""));
+  ox.font = "11px monospace";
+  const wMax = Math.max(...lines.map(t => ox.measureText(t).width)) + 14;
+  const hBox = lines.length * 16 + 8;
+  const bxr = Math.min(x + 14, W() - wMax - 4), byr = Math.max(4, y - hBox - 10);
+  ox.fillStyle = "rgba(13,17,23,.92)"; ox.fillRect(bxr, byr, wMax, hBox);
+  ox.strokeStyle = "#1d2733"; ox.lineWidth = 1; ox.strokeRect(bxr, byr, wMax, hBox);
+  ox.fillStyle = "#c5d0d9"; ox.textAlign = "left";
+  lines.forEach((t, k) => ox.fillText(t, bxr + 7, byr + 16 + k * 16));
 }
 
 function refreshView() { if (V.follow) { V.end = D.frames.length - 1; autoRange(); }
@@ -299,13 +363,21 @@ wrap.addEventListener("pointerdown", e => {
 });
 wrap.addEventListener("pointermove", e => {
   if (!drag) return;
-  const dp = (e.clientY - drag.y) / H() * (V.pHi - V.pLo);
+  // тянешь вверх — график едет вверх за курсором (окно цены вниз), как в
+  // торговых терминалах
+  const dp = (drag.y - e.clientY) / H() * (V.pHi - V.pLo);
   V.pLo = drag.pLo - dp; V.pHi = drag.pHi - dp;
   const dCols = Math.round((e.clientX - drag.x) / V.colW);
   V.end = Math.max(Math.min(drag.end - dCols, D.frames.length - 1), Math.min(20, D.frames.length - 1));
   if (V.follow && (dp || dCols)) { V.follow = false; $("follow").classList.remove("active"); }
   repaintHeat(); drawOverlay();
 });
+wrap.addEventListener("pointermove", e => {
+  if (drag) { V.hover = null; return; }
+  V.hover = {x: e.offsetX, y: e.offsetY};
+  drawOverlay();
+});
+wrap.addEventListener("pointerleave", () => { V.hover = null; drawOverlay(); });
 const endDrag = () => { drag = null; wrap.classList.remove("drag"); };
 wrap.addEventListener("pointerup", endDrag);
 wrap.addEventListener("pointercancel", endDrag);
@@ -339,6 +411,7 @@ async function loadSnapshot() {
   S.frames = snap.frames; S.bars = snap.bars; S.lastTs = snap.last_ts || 0;
   S.vmaxLog = 1; updateVmax(S.frames);
   buildDisplay();
+  globalScale();
   V.end = D.frames.length - 1;
   if (V.follow || V.pHi <= V.pLo) { V.follow = true; $("follow").classList.add("active"); autoRange(); }
   repaintHeat(); drawOverlay();
@@ -365,6 +438,9 @@ async function tick() {
       const vmaxGrew = updateVmax(d.frames);
       const prevCols = D.bars.length;
       buildDisplay();
+      // шкала пересчитывается редко: рост максимума или +300 кадров данных
+      const rescale = vmaxGrew || S.frames.length - scaleFramesAt >= 300;
+      if (rescale) globalScale();
       if (V.follow) {
         V.end = D.frames.length - 1;
         // гистерезис: окно цены ЛИПКОЕ — пересчитываем его только когда
@@ -374,7 +450,7 @@ async function tick() {
         const margin = (V.pHi - V.pLo) * 0.04;
         const cramped = !b || b.h > V.pHi - margin || b.l < V.pLo + margin;
         if (cramped) autoRange();
-        if (cramped || vmaxGrew) repaintHeat();
+        if (cramped || rescale) repaintHeat();
         else {
           // законченные колонки показа дорисовываются; формирующаяся
           // (последняя) переписывается по месту — это не перерисовка вида
@@ -407,6 +483,7 @@ async function main() {
   $("tf").onchange = () => {
     S.tf = parseInt($("tf").value, 10);
     buildDisplay();
+    globalScale();
     setFollow(true);       // смена нарезки — новый вид: авто-кадр и перерисовка
     refreshView();
   };
