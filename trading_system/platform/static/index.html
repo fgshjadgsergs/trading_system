@@ -100,7 +100,7 @@ const V = {                    // вид
   pLo: 0, pHi: 1,              // окно цены (зум/пан по цене)
   end: 0,                      // индекс кадра у правого края (пан по времени)
   drawnCols: 0, drawnEnd: 0,   // что реально лежит на тепловом слое
-  qLo: 0, qHi: 1,              // цветовая шкала данных (log1p-квантили)
+  eq: null,                    // цветовая шкала: сортированная выборка log1p-тепла
   hover: null,                 // {x, y} курсора для перекрестия
 };
 
@@ -114,10 +114,18 @@ const LUT = (() => {
   return lut;
 })();
 const colColor = h => {
-  /* шкала по квантилям ВИДИМЫХ колонок (V.qLo..V.qHi в log1p): контраст
-     адаптируется к зуму; пересчитывается только при полной перерисовке,
-     поэтому дорисованные колонки консистентны с уже нарисованными */
-  const v = (Math.log1p(h) - V.qLo) / (V.qHi - V.qLo);
+  /* ранговая шкала (выравнивание гистограммы): цвет = положение ячейки в
+     отсортированной выборке всего тепла. Даёт текстуру при ЛЮБОМ
+     распределении — плотный пласт одинаково-крупных ячеек не сливается в
+     одну заливку, как было с линейной шкалой по квантилям. Выборка
+     пересчитывается редко (globalScale), поэтому дорисованные колонки
+     консистентны с уже нарисованными. */
+  const eq = V.eq;
+  if (!eq || !eq.length) return "rgb(15,127,116)";
+  const x = Math.log1p(h);
+  let lo = 0, hi = eq.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (eq[m] < x) lo = m + 1; else hi = m; }
+  const v = lo / eq.length;
   const c = LUT[Math.max(0, Math.min(255, Math.round(v * 255)))];
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 };
@@ -139,7 +147,10 @@ function autoRange() {
     if (b.h > hi) hi = b.h;
   }
   if (lo === Infinity) return;
-  const pad = (hi - lo) * 0.18 + (hi + lo) * 5e-4;
+  // запас в долях ЦЕНЫ, не только диапазона: ближние ранги плеч (100-125x,
+  // ~0.8-1% от цены) должны попадать в кадр, как в статичном рендере
+  const last = D.bars[V.end];
+  const pad = Math.max((hi - lo) * 0.18, (last ? last.c : hi) * 0.0075);
   V.pLo = lo - pad; V.pHi = hi + pad;
 }
 
@@ -175,11 +186,14 @@ function globalScale() {
     for (const [, h] of fr.cols) if (h > 0) vals.push(Math.log1p(h));
   }
   scaleFramesAt = S.frames.length;
-  if (vals.length < 8) { V.qLo = 0; V.qHi = Math.max(S.vmaxLog, 1); return; }
   vals.sort((a, b) => a - b);
-  V.qLo = vals[Math.floor(vals.length * 0.55)];
-  V.qHi = vals[Math.min(vals.length - 1, Math.floor(vals.length * 0.995))];
-  if (!(V.qHi > V.qLo)) { V.qLo = 0; V.qHi = Math.max(S.vmaxLog, 1); }
+  // ограничить выборку: бинарный поиск на 4000 точек — доли микросекунды
+  const cap = 4000;
+  if (vals.length > cap) {
+    const thin = [];
+    for (let i = 0; i < cap; i++) thin.push(vals[Math.floor(i * vals.length / cap)]);
+    V.eq = thin;
+  } else V.eq = vals;
 }
 
 function drawProjection() {

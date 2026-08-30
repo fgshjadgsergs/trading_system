@@ -181,3 +181,16 @@ def test_fractional_flag_changes_epoch():
     a.apply_bar(bar)
     b.apply_bar(bar)
     assert a.epoch != b.epoch  # другая семантика снятия = другое состояние
+
+
+def test_platform_blur_spreads_level_into_cluster():
+    """С размытием уровень — скопление соседних бакетов с ярким ядром, а не
+    одна плита; масса сохраняется. Частичное касание съедает край скопления."""
+    st = LiveMapState("XUSDT", bucket_size=10.0, blur_sigma0_bps=12.0,
+                      fractional_edge_consume=True)
+    st.apply_bar(Bar(0, MIN_NS, 10_000.0, 10_010.0, 9_990.0, 10_000.0, 1e6))
+    frame = st.snapshot()["frames"][-1]["cols"]
+    total = sum(h for _, h in frame)
+    assert total == pytest.approx(1e6, rel=1e-6)     # масса не потерялась
+    # хотя бы один слайс размазан: больше занятых бакетов, чем рангов плеч
+    assert len(frame) > 24  # 12 плеч x 2 стороны = 24 точечных бакета без блюра

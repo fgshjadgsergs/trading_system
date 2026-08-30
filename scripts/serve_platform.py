@@ -38,11 +38,16 @@ def main() -> None:
     ap.add_argument("--symbols", nargs="+", default=["BTCUSDT"])
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--bucket-bps", type=float, default=10.0,
-                    help="шаг ценового бакета в bps от цены (10 = 0.1%%)")
+    ap.add_argument("--bucket-bps", type=float, default=5.0,
+                    help="шаг ценового бакета в bps от цены (5 = 0.05%%, "
+                         "как ряды референсных теплокарт)")
     ap.add_argument("--half-life-h", type=float, default=float("inf"),
                     help="полураспад; по умолчанию inf — уровни живут до снятия ценой")
     ap.add_argument("--close-out-fraction", type=float, default=0.0)
+    ap.add_argument("--blur-bps", type=float, default=12.0,
+                    help="размытие уровня в bps цены: позиции одного плеча "
+                         "входили по разбросу цен, уровень — скопление, а не "
+                         "точка (0 = выключить)")
     ap.add_argument("--poll-s", type=float, default=2.0)
     ap.add_argument("--demo-speed", type=float, default=60.0,
                     help="демо: во сколько раз ускорить время (60 = бар в секунду)")
@@ -63,6 +68,7 @@ def main() -> None:
             # свеча, задевшая КРАЙ бакета, снимает только пройденную долю —
             # иначе фитиль в треть полосы стирает её целиком
             fractional_edge_consume=True,
+            blur_sigma0_bps=args.blur_bps if args.blur_bps > 0 else None,
         )
 
     for i, sym in enumerate(args.symbols):
