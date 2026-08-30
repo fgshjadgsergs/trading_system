@@ -50,7 +50,7 @@ async def http_get_json(url: str, params: dict | None = None) -> dict | list:
             print(f"  запрос не прошёл ({exc!r}), повтор через {wait} с "
                   f"[{url.rsplit('/', 1)[-1]}]", flush=True)
             await asyncio.sleep(wait)
-    raise SystemExit(f"эндпоинт не отвечает после 4 попыток: {url}")
+    return None  # эндпоинт не отвечает: пусть решает вызывающий этап
 
 
 MS_MIN = 60_000
@@ -84,7 +84,8 @@ def parse_oi_hist(payload: list[dict], ts_recv: int) -> list[OpenInterest]:
     ]
 
 
-async def backfill_symbol(lake: Path, rest_base: str, sym: str, days: int) -> dict[str, int]:
+async def backfill_symbol(lake: Path, rest_base: str, sym: str, days: int,
+                          skip_ratio: bool = False) -> dict[str, int]:
     added = {"kline": 0, "open_interest": 0, "ratio": 0}
     print(f"{sym}: тяну свечи…", flush=True)
     now_ms = now_ns() // 1_000_000
@@ -98,6 +99,8 @@ async def backfill_symbol(lake: Path, rest_base: str, sym: str, days: int) -> di
             f"{rest_base}/fapi/v1/klines",
             {"symbol": sym, "interval": "1m", "startTime": cursor, "limit": 1500},
         )
+        if payload is None:
+            raise SystemExit("свечи обязательны, а эндпоинт не отвечает — стоп")
         if not payload:
             break
         klines = [k for k in parse_rest_klines(payload, sym)
@@ -122,7 +125,7 @@ async def backfill_symbol(lake: Path, rest_base: str, sym: str, days: int) -> di
             {"symbol": sym, "period": "5m", "startTime": cursor,
              "endTime": min(cursor + 499 * 300_000, now_ms), "limit": 500},
         )
-        if not isinstance(payload, list) or not payload:
+        if payload is None or not isinstance(payload, list) or not payload:
             break
         recs = [r for r in parse_oi_hist(payload, now_ns()) if r.ts_event > have]
         if recs:
@@ -133,26 +136,34 @@ async def backfill_symbol(lake: Path, rest_base: str, sym: str, days: int) -> di
         cursor = int(payload[-1]["timestamp"]) + 300_000
         await asyncio.sleep(0.15)
 
-    # -- ратио: три метрики, тот же формат окна -------------------------------
-    print(f"{sym}: OI +{added['open_interest']}, тяну ратио…", flush=True)
-    have = last_ts_in_lake(lake, "ratio", sym, "ts_event")
-    for path, parser in RATIO_PARSERS.items():
-        cursor = max(start_ms, have // 1_000_000 + 1)
-        while cursor < now_ms:
-            payload = await http_get_json(
-                f"{rest_base}/futures/data/{path}",
-                {"symbol": sym, "period": "5m", "startTime": cursor,
-                 "endTime": min(cursor + 499 * 300_000, now_ms), "limit": 500},
-            )
-            if not isinstance(payload, list) or not payload:
-                break
-            recs = [r for r in parser(payload, now_ns(), symbol=sym)
-                    if r.ts_event > have]
-            if recs:
-                write_batch(lake, "ratio", records_to_frame(recs, "ratio"))
-                added["ratio"] += len(recs)
-            cursor = int(payload[-1]["timestamp"]) + 300_000
-            await asyncio.sleep(0.15)
+    # -- ратио: три метрики; НЕОБЯЗАТЕЛЬНЫ (без них доли сторон 50/50, а
+    # живой рекордер пишет их сам) — сбой метрики не валит бэкфилл ------------
+    if not skip_ratio:
+        print(f"{sym}: OI +{added['open_interest']}, тяну ратио…", flush=True)
+        have = last_ts_in_lake(lake, "ratio", sym, "ts_event")
+        for path, parser in RATIO_PARSERS.items():
+            cursor = max(start_ms, have // 1_000_000 + 1)
+            pages = 0
+            while cursor < now_ms:
+                payload = await http_get_json(
+                    f"{rest_base}/futures/data/{path}",
+                    {"symbol": sym, "period": "5m", "startTime": cursor,
+                     "endTime": min(cursor + 499 * 300_000, now_ms), "limit": 500},
+                )
+                if payload is None:
+                    print(f"  {path}: не отвечает — пропускаю метрику", flush=True)
+                    break
+                if not isinstance(payload, list) or not payload:
+                    break
+                recs = [r for r in parser(payload, now_ns(), symbol=sym)
+                        if r.ts_event > have]
+                if recs:
+                    write_batch(lake, "ratio", records_to_frame(recs, "ratio"))
+                    added["ratio"] += len(recs)
+                pages += 1
+                print(f"  {path}: страница {pages}, +{len(recs)}", flush=True)
+                cursor = int(payload[-1]["timestamp"]) + 300_000
+                await asyncio.sleep(1.0)  # /futures/data строже к темпу
 
     return added
 
@@ -162,7 +173,8 @@ async def main_async(args: argparse.Namespace) -> None:
     lake.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     for sym in args.symbols:
-        added = await backfill_symbol(lake, args.rest_base, sym, args.days)
+        added = await backfill_symbol(lake, args.rest_base, sym, args.days,
+                                      skip_ratio=args.skip_ratio)
         log.info("backfill_done", symbol=sym, **added)
         print(f"{sym:>9}: свечей +{added['kline']}, OI +{added['open_interest']}, "
               f"ратио +{added['ratio']}")
@@ -181,6 +193,8 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=3,
                     help="глубина истории (свечи — любая, OI/ратио — максимум ~30)")
     ap.add_argument("--rest-base", default="https://fapi.binance.com")
+    ap.add_argument("--skip-ratio", action="store_true",
+                    help="не тянуть историю ратио (карта работает и без неё)")
     args = ap.parse_args()
     asyncio.run(main_async(args))
 
