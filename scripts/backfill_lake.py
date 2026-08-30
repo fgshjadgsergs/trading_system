@@ -27,7 +27,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import structlog
 
 from scripts.record_live import http_get_json as _http_get_json
+from trading_system.collectors.binance import (
+    parse_global_ls_account,
+    parse_rest_klines,
+    parse_taker_ls,
+    parse_top_ls_position,
+)
+from trading_system.core.io import read_stream, write_batch
+from trading_system.core.schema import OpenInterest, records_to_frame
+from trading_system.core.timeutils import ms_to_ns, now_ns
 
+log = structlog.get_logger()
 
 async def http_get_json(url: str, params: dict | None = None) -> dict | list:
     """Обёртка с видимым прогрессом и ретраями: бэкфилл — интерактивный
@@ -41,17 +51,7 @@ async def http_get_json(url: str, params: dict | None = None) -> dict | list:
                   f"[{url.rsplit('/', 1)[-1]}]", flush=True)
             await asyncio.sleep(wait)
     raise SystemExit(f"эндпоинт не отвечает после 4 попыток: {url}")
-from trading_system.collectors.binance import (
-    parse_global_ls_account,
-    parse_rest_klines,
-    parse_taker_ls,
-    parse_top_ls_position,
-)
-from trading_system.core.io import read_stream, write_batch
-from trading_system.core.schema import OpenInterest, records_to_frame
-from trading_system.core.timeutils import ms_to_ns, now_ns
 
-log = structlog.get_logger()
 
 MS_MIN = 60_000
 RATIO_PARSERS = {
