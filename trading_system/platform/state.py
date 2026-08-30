@@ -59,6 +59,7 @@ class LiveMapState:
         *,
         decay_half_life_s: float = float("inf"),
         close_out_fraction: float = 0.0,
+        fractional_edge_consume: bool = False,
         max_frames: int = 3000,
         heat_floor_usd: float = 1.0,
     ) -> None:
@@ -71,6 +72,7 @@ class LiveMapState:
             weight_fn=StaticWeights(SEED_W),
             decay_half_life_s=decay_half_life_s,
             close_out_fraction=close_out_fraction,
+            fractional_edge_consume=fractional_edge_consume,
         )
         self._heat_floor = heat_floor_usd
         self._frames: deque[dict[str, Any]] = deque(maxlen=max_frames)
@@ -86,6 +88,7 @@ class LiveMapState:
                 "bucket_size": bucket_size,
                 "half_life_s": decay_half_life_s,
                 "close_out": close_out_fraction,
+                "fractional_edges": fractional_edge_consume,
                 "grid": GRID,
                 "w": SEED_W.tolist(),
                 "v": 1,  # поднимать при несовместимой смене семантики кадров

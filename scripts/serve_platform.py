@@ -38,7 +38,8 @@ def main() -> None:
     ap.add_argument("--symbols", nargs="+", default=["BTCUSDT"])
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--bucket-bps", type=float, default=30.0)
+    ap.add_argument("--bucket-bps", type=float, default=10.0,
+                    help="шаг ценового бакета в bps от цены (10 = 0.1%%)")
     ap.add_argument("--half-life-h", type=float, default=float("inf"),
                     help="полураспад; по умолчанию inf — уровни живут до снятия ценой")
     ap.add_argument("--close-out-fraction", type=float, default=0.0)
@@ -59,6 +60,9 @@ def main() -> None:
             bucket_size=price0 * args.bucket_bps * 1e-4,
             decay_half_life_s=half_life_s,
             close_out_fraction=args.close_out_fraction,
+            # свеча, задевшая КРАЙ бакета, снимает только пройденную долю —
+            # иначе фитиль в треть полосы стирает её целиком
+            fractional_edge_consume=True,
         )
 
     for i, sym in enumerate(args.symbols):

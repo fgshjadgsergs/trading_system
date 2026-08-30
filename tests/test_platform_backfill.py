@@ -7,6 +7,7 @@ import math
 import time
 
 import polars as pl
+import pytest
 
 from scripts.backfill_lake import parse_oi_hist
 from trading_system.collectors.binance import parse_premium_index, parse_rest_klines
@@ -154,3 +155,29 @@ def test_backfill_idempotent_filter(tmp_path):
     assert have == t0 + MIN_NS - 1_000_000
     df = read_stream(lake, "kline", symbol="BTCUSDT")
     assert isinstance(df, pl.DataFrame) and df.height == 1
+
+
+def test_platform_partial_band_survives(tmp_path):
+    """Свеча, вошедшая в полосу частично, оставляет непройденную часть:
+    платформа включает fractional_edge_consume (краевой бакет теряет долю,
+    равную доле пройденного интервала). Без флага бакет стирался бы целиком."""
+    st = LiveMapState("XUSDT", bucket_size=100.0, fractional_edge_consume=True)
+    side = list(st.map.heat)[0]
+    st.map.heat[side][10] = 1_000.0   # полоса [1000, 1100)
+    st.map.contributed = 1_000.0
+    st.apply_bar(Bar(0, MIN_NS, 900.0, 1_030.0, 890.0, 905.0, 0.0))
+    assert st.map.heat[side][10] == pytest.approx(700.0)  # пройдено 30% полосы
+    st2 = LiveMapState("XUSDT", bucket_size=100.0)        # старое поведение
+    st2.map.heat[side][10] = 1_000.0
+    st2.map.contributed = 1_000.0
+    st2.apply_bar(Bar(0, MIN_NS, 900.0, 1_030.0, 890.0, 905.0, 0.0))
+    assert 10 not in st2.map.heat[side]
+
+
+def test_fractional_flag_changes_epoch():
+    a = LiveMapState("XUSDT", bucket_size=1.0, fractional_edge_consume=True)
+    b = LiveMapState("XUSDT", bucket_size=1.0, fractional_edge_consume=False)
+    bar = Bar(0, MIN_NS, 100.0, 101.0, 99.0, 100.0, 1e5)
+    a.apply_bar(bar)
+    b.apply_bar(bar)
+    assert a.epoch != b.epoch  # другая семантика снятия = другое состояние
