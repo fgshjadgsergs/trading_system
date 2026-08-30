@@ -191,6 +191,54 @@ def parse_depth_snapshot(payload: dict, symbol: str, ts_recv: int) -> BookSnapsh
     )
 
 
+def parse_rest_klines(payload: list[list], symbol: str) -> list[Kline]:
+    """/fapi/v1/klines: массив массивов [openTime, o, h, l, c, vol, closeTime,
+    quoteVol, nTrades, takerBase, takerQuote, ignore]. Свеча закрыта, если её
+    closeTime уже в прошлом (эндпоинт отдаёт последнюю ФОРМИРУЮЩУЮСЯ строку).
+
+    REST-фолбэк для сетей, где шлюз глушит ws-поток kline, пропуская только
+    depth (наблюдалось 20.08 и 30.08.2026): подписка подтверждается, данные
+    не идут. По REST те же свечи доступны обычным опросом.
+    """
+    now_ms = now_ns() // 1_000_000
+    out: list[Kline] = []
+    for row in payload:
+        close_ms = int(row[6])
+        out.append(
+            Kline(
+                exchange=EXCHANGE,
+                symbol=symbol,
+                ts_open=ms_to_ns(int(row[0])),
+                ts_close=ms_to_ns(close_ms),
+                open=float(row[1]),
+                high=float(row[2]),
+                low=float(row[3]),
+                close=float(row[4]),
+                volume=float(row[5]),
+                quote_volume=float(row[7]),
+                taker_buy_volume=float(row[9]),
+                taker_buy_quote_volume=float(row[10]),
+                n_trades=int(row[8]),
+                closed=close_ms < now_ms,
+            )
+        )
+    return out
+
+
+def parse_premium_index(payload: dict, ts_recv: int) -> MarkPrice:
+    """/fapi/v1/premiumIndex -> MarkPrice (REST-фолбэк ws-потока markPrice)."""
+    return MarkPrice(
+        exchange=EXCHANGE,
+        symbol=payload["symbol"],
+        ts_event=ms_to_ns(int(payload["time"])),
+        ts_recv=ts_recv,
+        mark_price=float(payload["markPrice"]),
+        index_price=float(payload["indexPrice"]),
+        funding_rate=float(payload["lastFundingRate"]),
+        next_funding_ts=ms_to_ns(int(payload["nextFundingTime"])),
+    )
+
+
 def parse_open_interest(payload: dict, ts_recv: int, price: float | None = None) -> OpenInterest:
     """/fapi/v1/openInterest. USD notional needs a price the endpoint lacks;
     pass the latest mark price, else open_interest_usd is NaN (unknown)."""

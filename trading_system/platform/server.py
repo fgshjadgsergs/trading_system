@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from typing import Any, Protocol
@@ -16,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 import structlog
 
-from trading_system.platform.state import LiveMapState
+from trading_system.platform.state import Bar, LiveMapState
 
 log = structlog.get_logger(__name__)
 
@@ -29,7 +30,8 @@ class Platform:
     """Состояния и фиды по символам + фоновая прокачка."""
 
     def __init__(self, poll_s: float = 2.0) -> None:
-        self._states: dict[str, LiveMapState] = {}
+        self._states: dict[str, LiveMapState | None] = {}
+        self._factories: dict[str, Callable[[Bar], LiveMapState]] = {}
         self._feeds: dict[str, BarFeed] = {}
         self._poll_s = poll_s
         self._stop = threading.Event()
@@ -38,6 +40,16 @@ class Platform:
     def add_symbol(self, state: LiveMapState, feed: BarFeed) -> None:
         self._states[state.symbol] = state
         self._feeds[state.symbol] = feed
+
+    def add_symbol_lazy(
+        self, symbol: str, feed: BarFeed, factory: Callable[[Bar], LiveMapState]
+    ) -> None:
+        """Состояние создаётся из ПЕРВОГО реального бара (масштаб сетки — от
+        его цены), а не из угаданной заранее цены: до первых баров символ
+        отвечает «прогрев» вместо карты в неправильном масштабе."""
+        self._states[symbol] = None
+        self._factories[symbol] = factory
+        self._feeds[symbol] = feed
 
     @property
     def symbols(self) -> list[str]:
@@ -56,6 +68,13 @@ class Platform:
                 log.exception("feed_poll_failed", symbol=sym)
                 continue
             st = self._states[sym]
+            if st is None:
+                if not bars:
+                    continue
+                st = self._factories[sym](bars[0])
+                self._states[sym] = st
+                log.info("state_created", symbol=sym,
+                         bucket_size=st.map.buckets.bucket_size)
             for bar in bars:
                 try:
                     applied += bool(st.apply_bar(bar))
@@ -109,19 +128,29 @@ def make_handler(platform: Platform) -> type[BaseHTTPRequestHandler]:
                 elif url.path == "/api/meta":
                     self._json({
                         "symbols": platform.symbols,
-                        "states": {s: platform.state(s).meta() for s in platform.symbols},
+                        "states": {
+                            s: (st.meta() if (st := platform.state(s)) is not None
+                                else {"symbol": s, "warming": True})
+                            for s in platform.symbols
+                        },
                         "server_time_ns": time.time_ns(),
                     })
                 elif url.path == "/api/snapshot":
-                    st = platform.state(q.get("symbol", ""))
-                    if st is None:
+                    sym = q.get("symbol", "")
+                    if sym not in platform.symbols:
                         self._json({"error": "unknown symbol"}, 404)
+                    elif (st := platform.state(sym)) is None:
+                        self._json({"type": "warming", "symbol": sym})
                     else:
                         self._json(st.snapshot())
                 elif url.path == "/api/delta":
-                    st = platform.state(q.get("symbol", ""))
-                    if st is None:
+                    sym = q.get("symbol", "")
+                    if sym not in platform.symbols:
                         self._json({"error": "unknown symbol"}, 404)
+                    elif (st := platform.state(sym)) is None:
+                        self._json({"type": "warming", "symbol": sym,
+                                    "gap": False, "frames": [], "bars": [],
+                                    "epoch": None, "last_ts": None})
                     else:
                         self._json(st.delta(int(q.get("since", "0")), q.get("epoch")))
                 else:

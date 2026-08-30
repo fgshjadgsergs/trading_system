@@ -50,29 +50,29 @@ def main() -> None:
         raise SystemExit("нужен --lake или --demo")
 
     platform = Platform(poll_s=args.poll_s)
-    for i, sym in enumerate(args.symbols):
-        if args.demo:
-            feed = DemoBarFeed(sym, price0=DEMO_PRICE.get(sym, 100.0),
-                               seed=7 + i, speed=args.demo_speed)
-            price0 = DEMO_PRICE.get(sym, 100.0)
-        else:
-            feed = LakeBarFeed(args.lake, sym)
-            probe = feed.poll()  # первая порция даёт цену для сетки
-            price0 = probe[-1].close if probe else None
-            if price0 is None:
-                log.warning("no_bars_yet", symbol=sym)
-                price0 = DEMO_PRICE.get(sym, 100.0)
-        state = LiveMapState(
+    half_life_s = (args.half_life_h * 3600.0
+                   if args.half_life_h != float("inf") else float("inf"))
+
+    def make_state(sym: str, price0: float) -> LiveMapState:
+        return LiveMapState(
             sym,
             bucket_size=price0 * args.bucket_bps * 1e-4,
-            decay_half_life_s=args.half_life_h * 3600.0
-            if args.half_life_h != float("inf") else float("inf"),
+            decay_half_life_s=half_life_s,
             close_out_fraction=args.close_out_fraction,
         )
-        if not args.demo:
-            for bar in probe:  # уже прочитанные бары не должны потеряться
-                state.apply_bar(bar)
-        platform.add_symbol(state, feed)
+
+    for i, sym in enumerate(args.symbols):
+        if args.demo:
+            price0 = DEMO_PRICE.get(sym, 100.0)
+            feed = DemoBarFeed(sym, price0=price0, seed=7 + i, speed=args.demo_speed)
+            platform.add_symbol(make_state(sym, price0), feed)
+        else:
+            # масштаб сетки — от цены ПЕРВОГО реального бара; до первых
+            # баров символ отвечает «прогрев», а не карту не в том масштабе
+            platform.add_symbol_lazy(
+                sym, LakeBarFeed(args.lake, sym),
+                lambda first, s=sym: make_state(s, first.close),
+            )
     platform.start()
     httpd = serve(platform, args.host, args.port)
     try:

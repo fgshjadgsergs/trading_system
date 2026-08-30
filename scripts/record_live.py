@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 import urllib.parse
 import urllib.request
 from functools import partial
@@ -28,6 +29,8 @@ from trading_system.collectors.binance import (
     BinanceUsdmAdapter,
     parse_global_ls_account,
     parse_open_interest,
+    parse_premium_index,
+    parse_rest_klines,
     parse_taker_ls,
     parse_top_ls_position,
 )
@@ -112,8 +115,48 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
     # последняя mark-цена из ws-потока: без неё open_interest_usd = NaN и
     # весь USD-номинал OI пришлось бы восстанавливать задним числом
     last_mark: dict[str, float] = {}
+    # какие ws-потоки реально приносят данные: REST-фолбэк пишет клайны и
+    # mark-цену только пока соответствующий ws молчит (шлюзы некоторых сетей
+    # пропускают ТОЛЬКО depth — подписка подтверждается, данных нет)
+    ws_alive: dict[str, float] = {}
+    last_rest_kline: dict[str, int] = {}
+
+    def rest_klines_if_ws_dead(payload, ts_recv, s=None):
+        if time.monotonic() - ws_alive.get("kline", 0.0) < 180.0:
+            return []
+        out = []
+        for k in parse_rest_klines(payload, s):
+            if k.closed and k.ts_close > last_rest_kline.get(s, 0):
+                last_rest_kline[s] = k.ts_close
+                out.append(k)
+        return out
+
+    def rest_mark_if_ws_dead(payload, ts_recv):
+        rec = parse_premium_index(payload, ts_recv)
+        last_mark[rec.symbol] = rec.mark_price  # цена для OI нужна всегда
+        if time.monotonic() - ws_alive.get("mark_price", 0.0) < 180.0:
+            return []
+        return [rec]
+
     pollers = []
     for sym in symbols:
+        pollers.append(
+            RestPoller(
+                30.0,
+                partial(http_get_json, f"{rest_base}/fapi/v1/klines",
+                        {"symbol": sym, "interval": "1m", "limit": 3}),
+                partial(rest_klines_if_ws_dead, s=sym),
+                writer.add,
+            )
+        )
+        pollers.append(
+            RestPoller(
+                5.0,
+                partial(http_get_json, f"{rest_base}/fapi/v1/premiumIndex", {"symbol": sym}),
+                rest_mark_if_ws_dead,
+                writer.add,
+            )
+        )
         pollers.append(
             RestPoller(
                 float(col_cfg["open_interest_poll_s"]),
@@ -164,6 +207,7 @@ async def run(symbols: list[str], lake: Path, cfg: dict) -> None:
             for rec in adapter.normalize(raw):
                 name = type(rec).__name__
                 rec_counts[name] = rec_counts.get(name, 0) + 1
+                ws_alive[kind] = time.monotonic()
                 if isinstance(rec, MarkPrice):
                     last_mark[rec.symbol] = rec.mark_price
                 if isinstance(rec, DepthDiff):

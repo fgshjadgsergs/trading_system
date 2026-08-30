@@ -331,6 +331,10 @@ const setStatus = t => { $("status").innerHTML = t; };
 
 async function loadSnapshot() {
   const snap = await api(`/api/snapshot?symbol=${S.symbol}`);
+  if (snap.type === "warming") {          // лейк ещё без баров: ждём первые
+    setStatus("ждём первые бары из лейка…");
+    return false;
+  }
   S.epoch = snap.epoch; S.bucket = snap.bucket_size;
   S.frames = snap.frames; S.bars = snap.bars; S.lastTs = snap.last_ts || 0;
   S.vmaxLog = 1; updateVmax(S.frames);
@@ -338,12 +342,14 @@ async function loadSnapshot() {
   V.end = D.frames.length - 1;
   if (V.follow || V.pHi <= V.pLo) { V.follow = true; $("follow").classList.add("active"); autoRange(); }
   repaintHeat(); drawOverlay();
+  return true;
 }
 
 async function tick() {
   try {
-    if (!S.epoch) await loadSnapshot();
+    if (!S.epoch && !(await loadSnapshot())) return;
     const d = await api(`/api/delta?symbol=${S.symbol}&since=${S.lastTs}&epoch=${S.epoch}`);
+    if (d.type === "warming") { setStatus("ждём первые бары из лейка…"); return; }
     if (d.gap || d.epoch !== S.epoch) {
       window.__gapReloads++;
       await loadSnapshot();
